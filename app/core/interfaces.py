@@ -22,6 +22,20 @@ class LLMProvider(ABC):
         반환: 에이전트 응답 텍스트
         """
 
+    async def chat_with_system(self, system: str, history: list[dict]) -> str:
+        """
+        시스템 프롬프트를 동적으로 지정해 호출.
+        기본 구현: 서브클래스에서 오버라이드 가능.
+        """
+        # 기본 구현: history 앞에 system 메시지 삽입 방식으로 처리
+        # Gemini/Claude 각 어댑터에서 오버라이드해 네이티브 system 파라미터 사용
+        augmented = [{"role": "user", "content": f"[시스템 지시]
+{system}
+
+[사용자 메시지]
+{history[-1]['content']}"}]
+        return await self.chat(augmented)
+
 
 # ── STT ──────────────────────────────────────────────────────────────
 class STTProvider(ABC):
