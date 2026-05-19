@@ -2,33 +2,34 @@
 app/routes/chat.py
 ───────────────────
 에이전트 로직 테스트용 텍스트 채팅 엔드포인트.
-통신망/STT/TTS 없이 HTTP + WebSocket으로 대화.
+/prompt에서 저장한 에이전트 설계(get_design())를 그대로 사용해
+설계 변경이 즉시 테스트에 반영된다.
 
 엔드포인트:
   POST /chat/session              새 세션 시작 → 첫 인사 반환
-  POST /chat/session/{id}/message 메시지 전송 → 응답 반환
+  POST /chat/session/{id}/message 메시지 전송 → SSE 스트리밍 응답
   GET  /chat/session/{id}/history 대화 히스토리 조회
   DELETE /chat/session/{id}       세션 종료
-  WS   /chat/ws/{id}              WebSocket 스트리밍 (선택)
+  GET  /chat/sessions             활성 세션 목록
 """
+import json
 import logging
 import uuid
 from typing import Dict
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.core.text_agent import TextAgent
-from app.providers.factory import get_llm
+from app.core.multi_agent import MultiAgentRunner, get_design
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat-test"])
 
-# 세션 저장소 (메모리, 대용량 시 Redis로 교체)
-_sessions: Dict[str, TextAgent] = {}
+# 세션 히스토리 저장소 (메모리)
+_sessions: Dict[str, list] = {}
 
 
-# ── 요청/응답 스키마 ──────────────────────────────
 class SessionResponse(BaseModel):
     session_id: str
     greeting: str
@@ -36,87 +37,71 @@ class SessionResponse(BaseModel):
 class MessageRequest(BaseModel):
     text: str
 
-class MessageResponse(BaseModel):
-    session_id: str
-    user: str
-    agent: str
 
-
-# ── 세션 시작 ─────────────────────────────────────
 @router.post("/session", response_model=SessionResponse)
 async def create_session():
-    """새 통화 세션 시작. 에이전트 첫 인사를 반환."""
     session_id = str(uuid.uuid4())[:8]
-    agent = TextAgent(session_id=session_id, llm=get_llm())
-    _sessions[session_id] = agent
-
-    greeting = await agent.greet()
-    log.info("세션 생성: %s", session_id)
+    _sessions[session_id] = []
+    design = get_design()
+    greeting = "안녕하세요! AI 상담사 아리입니다. 무엇을 도와드릴까요?"
+    _sessions[session_id].append({"role": "assistant", "content": greeting})
+    log.info("세션 생성: %s (design: %d sub-agents)", session_id, len(design.sub_agents))
     return SessionResponse(session_id=session_id, greeting=greeting)
 
 
-# ── 메시지 전송 ───────────────────────────────────
-@router.post("/session/{session_id}/message", response_model=MessageResponse)
+@router.post("/session/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
-    """텍스트 메시지 전송 → 에이전트 응답 반환."""
-    agent = _sessions.get(session_id)
-    if not agent:
+    if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
-    reply = await agent.chat(body.text)
-    return MessageResponse(session_id=session_id, user=body.text, agent=reply)
+    history = _sessions[session_id]
+    design = get_design()
+    runner = MultiAgentRunner()
+
+    # 사용자 메시지 히스토리에 추가
+    history.append({"role": "user", "content": body.text})
+
+    async def event_stream():
+        final_text = ""
+        try:
+            async for chunk in runner.run(body.text, history[:-1], design):
+                data = json.dumps(chunk, ensure_ascii=False)
+                yield f"data: {data}\n\n"
+                if chunk.get("type") == "final":
+                    final_text = chunk.get("text", "")
+        except Exception as e:
+            log.exception("send_message 오류")
+            err = json.dumps({"type": "error", "text": str(e)}, ensure_ascii=False)
+            yield f"data: {err}\n\n"
+        finally:
+            if final_text:
+                history.append({"role": "assistant", "content": final_text})
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-# ── 히스토리 조회 ──────────────────────────────────
 @router.get("/session/{session_id}/history")
 async def get_history(session_id: str):
-    agent = _sessions.get(session_id)
-    if not agent:
+    if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
-    return {"session_id": session_id, "history": agent.get_history()}
+    return {"session_id": session_id, "history": _sessions[session_id]}
 
 
-# ── 세션 종료 ──────────────────────────────────────
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
-    if session_id in _sessions:
-        del _sessions[session_id]
-        log.info("세션 종료: %s", session_id)
+    _sessions.pop(session_id, None)
     return {"session_id": session_id, "status": "closed"}
 
 
-# ── 활성 세션 목록 ─────────────────────────────────
 @router.get("/sessions")
 async def list_sessions():
+    design = get_design()
     return {
         "count": len(_sessions),
         "sessions": list(_sessions.keys()),
+        "active_design": {
+            "sub_agents": [a.id for a in design.sub_agents if a.enabled],
+            "main_prompt_preview": design.main.prompt[:80] + "...",
+        }
     }
-
-
-# ── WebSocket 스트리밍 ─────────────────────────────
-@router.websocket("/ws/{session_id}")
-async def chat_ws(ws: WebSocket, session_id: str):
-    """
-    WebSocket 실시간 채팅.
-    클라이언트: {"text": "메시지"}
-    서버:       {"type": "agent", "text": "응답"} 또는 {"type": "error", "text": "..."}
-    """
-    await ws.accept()
-    agent = _sessions.get(session_id)
-
-    if not agent:
-        await ws.send_json({"type": "error", "text": "세션을 찾을 수 없습니다."})
-        await ws.close()
-        return
-
-    log.info("WS 연결: %s", session_id)
-    try:
-        async for data in ws.iter_json():
-            user_text = data.get("text", "").strip()
-            if not user_text:
-                continue
-            reply = await agent.chat(user_text)
-            await ws.send_json({"type": "agent", "text": reply})
-    except WebSocketDisconnect:
-        log.info("WS 연결 종료: %s", session_id)
