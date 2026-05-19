@@ -17,6 +17,8 @@ from fastapi import FastAPI
 
 from app.routes.test_ui      import router as ui_router
 from app.routes.chat         import router as chat_router
+from app.routes.prompt_ui    import router as prompt_ui_router
+from app.routes.prompt_api   import router as prompt_api_router
 from app.routes.twiml        import router as twiml_router
 from app.routes.media_stream import router as ws_router, active_call_count
 
@@ -30,6 +32,8 @@ app = FastAPI(title="Phone AI Agent", version="0.1.0")
 # ── 통신망 불필요 (에이전트 로직 테스트) ──
 app.include_router(ui_router)
 app.include_router(chat_router)
+app.include_router(prompt_ui_router)
+app.include_router(prompt_api_router)
 
 # ── 통신망 필요 (Twilio 연동) ──────────────
 app.include_router(twiml_router)
@@ -43,7 +47,7 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"message": "Phone AI Agent", "test_ui": "/test", "api_docs": "/docs"}
+    return {"message": "Phone AI Agent", "test_ui": "/test", "prompt_designer": "/prompt", "api_docs": "/docs"}
 
 
 if __name__ == "__main__":
