@@ -90,7 +90,7 @@ class GoogleSTT(STTProvider):
             sample_rate_hertz=8000,
             language_code="ko-KR",
             enable_automatic_punctuation=True,
-            model="phone_call",   # 전화통화 최적화 모델
+            model="default",     # ko-KR 지원 모델
         )
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
