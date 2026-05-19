@@ -90,7 +90,7 @@ class GoogleSTT(STTProvider):
             sample_rate_hertz=8000,
             language_code="ko-KR",
             enable_automatic_punctuation=True,
-            model="latest_short",
+            model="phone_call",   # 전화통화 최적화 모델
         )
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
@@ -98,6 +98,7 @@ class GoogleSTT(STTProvider):
         )
 
         def audio_gen():
+            count = 0
             while self._running:
                 if time.time() - start >= STREAM_RESTART_SECS:
                     log.info("STT 스트림 갱신")
@@ -106,6 +107,11 @@ class GoogleSTT(STTProvider):
                     chunk = self._audio_q.get(timeout=1)
                     if chunk is None:
                         return
+                    count += 1
+                    if count == 1:
+                        log.info("STT 첫 오디오 수신")
+                    if count % 500 == 0:
+                        log.info("STT 오디오 누적: %d 청크", count)
                     yield speech.StreamingRecognizeRequest(audio_content=chunk)
                 except queue.Empty:
                     continue
