@@ -2,12 +2,14 @@ services:
   - type: web
     name: phone-ai-agent
     runtime: python
-    runtimeVersion: "3.11.9"
     buildCommand: pip install -r requirements.txt
     startCommand: bash render_startup.sh
     plan: free
 
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
       - key: LLM_PROVIDER
         value: gemini
       - key: STT_PROVIDER
@@ -25,4 +27,15 @@ services:
       - key: TWILIO_AUTH_TOKEN
         sync: false
       - key: TWILIO_PHONE_NUMBER
+        sync: false
+
+      # ── 프롬프트 설계 영속화 ─────────────────────
+      # /prompt에서 저장 시 자동 업데이트됨 (재배포 후 복원용)
+      - key: DESIGN_JSON
+        sync: false
+      # Render API 키 (설계 자동 백업용) — 선택사항
+      # Render Dashboard → Account Settings → API Keys에서 발급
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_SERVICE_ID
         sync: false
