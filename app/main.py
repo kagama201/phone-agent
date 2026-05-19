@@ -52,7 +52,7 @@ app.include_router(twiml_router)
 app.include_router(ws_router)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "active_calls": active_call_count()}
 
