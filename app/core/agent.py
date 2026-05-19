@@ -59,17 +59,18 @@ class CallAgent:
 
     # ── Twilio 오디오 수신 ──────────────────────
     async def receive_audio(self, payload_b64: str) -> None:
-        if self._speaking:
-            return
+        # TTS 재생 중에도 STT 스트림은 유지 (끊기면 재시작 비용 발생)
+        # 발화 콜백(_on_utterance)에서 _speaking 체크로 처리
         await self._stt.send_audio(base64.b64decode(payload_b64))
 
     # ── STT 발화 완성 ───────────────────────────
     async def _on_utterance(self, text: str) -> None:
-        if self._speaking:
-            return
         log.info("[%s] 사용자: %s", self.call_id, text)
-        # STT 결과 브라우저에 발행
         await bus.publish(self.call_id, "stt", text=text)
+        if self._speaking:
+            # TTS 중 발화는 무시 (에코 방지)
+            log.debug("[%s] TTS 중 발화 무시: %s", self.call_id, text)
+            return
         self._history.append({"role": "user", "content": text})
         await self._ask_llm()
 
