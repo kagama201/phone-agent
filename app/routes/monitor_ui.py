@@ -149,6 +149,7 @@ function connect() {
   ws.onclose = () => {
     document.getElementById('wsDot').className = 'ws-dot err';
     document.getElementById('wsStatus').textContent = '재연결 중...';
+    if (ws._pingTimer) { clearInterval(ws._pingTimer); ws._pingTimer = null; }
     reconnectTimer = setTimeout(connect, 3000);
   };
 
@@ -157,8 +158,18 @@ function connect() {
   };
 
   ws.onmessage = e => {
-    try { handleEvent(JSON.parse(e.data)); } catch(err) {}
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'ping') { ws.send(JSON.stringify({type:'pong'})); return; }
+      handleEvent(data);
+    } catch(err) {}
   };
+
+  // 브라우저 → 서버 30초마다 ping (Render WS 타임아웃 방지)
+  if (ws._pingTimer) clearInterval(ws._pingTimer);
+  ws._pingTimer = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:'ping'}));
+  }, 30000);
 }
 
 // ── 이벤트 처리 ───────────────────────────────

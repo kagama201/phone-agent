@@ -85,15 +85,30 @@ async def media_stream(ws: WebSocket):
 async def calls_ws(ws: WebSocket):
     await ws.accept()
     await bus.subscribe(ws)
+
+    async def ping_loop():
+        """Render 60초 타임아웃 방지 — 30초마다 서버 ping"""
+        try:
+            while True:
+                await asyncio.sleep(30)
+                await ws.send_text(json.dumps({"type": "ping"}))
+        except Exception:
+            pass
+
+    ping_task = asyncio.create_task(ping_loop())
     try:
-        # 연결 유지 (클라이언트 ping 대기)
         while True:
-            await ws.receive_text()
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=60)
+                # 클라이언트 pong 수신 — 무시
+            except asyncio.TimeoutError:
+                pass  # 타임아웃은 정상, 계속 유지
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        ping_task.cancel()
         bus.unsubscribe(ws)
 
 
