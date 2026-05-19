@@ -43,7 +43,19 @@ async def create_session():
     session_id = str(uuid.uuid4())[:8]
     _sessions[session_id] = []
     design = get_design()
-    greeting = "안녕하세요! AI 상담사 아리입니다. 무엇을 도와드릴까요?"
+
+    # 첫 인사를 LLM이 메인 프롬프트를 보고 직접 생성
+    from app.providers.factory import get_llm
+    llm = get_llm()
+    try:
+        greeting = await llm.chat_with_system(
+            design.main.prompt,
+            [{"role": "user", "content": "전화가 연결됐어. 첫 인사를 해줘. 한 문장으로."}],
+        )
+    except Exception as e:
+        log.warning("첫 인사 생성 실패, 기본값 사용: %s", e)
+        greeting = "안녕하세요! 무엇을 도와드릴까요?"
+
     _sessions[session_id].append({"role": "assistant", "content": greeting})
     log.info("세션 생성: %s (design: %d sub-agents)", session_id, len(design.sub_agents))
     return SessionResponse(session_id=session_id, greeting=greeting)
