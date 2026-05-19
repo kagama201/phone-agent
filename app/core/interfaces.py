@@ -29,11 +29,9 @@ class LLMProvider(ABC):
         """
         # 기본 구현: history 앞에 system 메시지 삽입 방식으로 처리
         # Gemini/Claude 각 어댑터에서 오버라이드해 네이티브 system 파라미터 사용
-        augmented = [{"role": "user", "content": f"[시스템 지시]
-{system}
-
-[사용자 메시지]
-{history[-1]['content']}"}]
+        nl = "\n"
+        msg = f"[시스템 지시]{nl}{system}{nl}{nl}[사용자 메시지]{nl}{history[-1]['content']}"
+        augmented = [{"role": "user", "content": msg}]
         return await self.chat(augmented)
 
 
