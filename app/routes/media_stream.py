@@ -1,8 +1,11 @@
 """
 app/routes/media_stream.py
 ───────────────────────────
-Twilio Media Stream WebSocket 엔드포인트.
-통화 한 건 = 하나의 WS 연결 = 하나의 CallAgent.
+Twilio Media Stream WebSocket + 브라우저 모니터링 WS.
+
+  WS /media-stream   Twilio 오디오 스트림
+  WS /ws/calls       브라우저 실시간 모니터링 구독
+  GET /calls         활성 통화 목록 (REST)
 """
 import asyncio
 import json
@@ -12,6 +15,7 @@ from typing import Dict
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.agent import CallAgent
+from app.core.call_event_bus import bus
 from app.providers.factory import get_llm, get_stt, get_tts
 
 log = logging.getLogger(__name__)
@@ -20,6 +24,7 @@ router = APIRouter()
 _active: Dict[str, CallAgent] = {}
 
 
+# ── Twilio 미디어 스트림 ──────────────────────────
 @router.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
@@ -42,15 +47,18 @@ async def media_stream(ws: WebSocket):
                 meta       = data["start"]
                 stream_sid = meta["streamSid"]
                 call_id    = meta.get("callSid", stream_sid)
+                # Twilio가 발신자 번호를 customParameters로 전달 가능
+                phone = meta.get("customParameters", {}).get("From", "")
                 log.info("통화 시작: %s", call_id)
 
                 agent = CallAgent(
-                    call_id      = call_id,
-                    stream_sid   = stream_sid,
-                    llm          = get_llm(),
-                    stt          = get_stt(),
-                    tts          = get_tts(),
+                    call_id       = call_id,
+                    stream_sid    = stream_sid,
+                    llm           = get_llm(),
+                    stt           = get_stt(),
+                    tts           = get_tts(),
                     send_audio_cb = send_audio,
+                    phone         = phone,
                 )
                 _active[call_id] = agent
                 asyncio.create_task(agent.start())
@@ -70,6 +78,32 @@ async def media_stream(ws: WebSocket):
         if agent:
             await agent.close()
             _active.pop(agent.call_id, None)
+
+
+# ── 브라우저 모니터링 구독 ────────────────────────
+@router.websocket("/ws/calls")
+async def calls_ws(ws: WebSocket):
+    await ws.accept()
+    await bus.subscribe(ws)
+    try:
+        # 연결 유지 (클라이언트 ping 대기)
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        bus.unsubscribe(ws)
+
+
+# ── 활성 통화 목록 REST ───────────────────────────
+@router.get("/calls")
+async def get_calls():
+    return {
+        "count": len(_active),
+        "calls": bus.get_active_calls(),
+    }
 
 
 def active_call_count() -> int:
