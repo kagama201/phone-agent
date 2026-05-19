@@ -44,6 +44,9 @@ class CallAgent:
         await self._stt.connect(on_utterance=self._on_utterance)
         log.info("[%s] 에이전트 시작", self.call_id)
 
+        # Twilio WS 스트림 안정화 대기 (너무 빨리 보내면 유실)
+        await asyncio.sleep(1.0)
+
         from app.core.multi_agent import get_design
         design = get_design()
         try:
@@ -51,16 +54,21 @@ class CallAgent:
                 design.main.prompt,
                 [{"role": "user", "content": "전화가 연결됐어. 첫 인사를 해줘. 한 문장으로."}],
             )
-        except Exception:
+        except Exception as e:
+            log.error("[%s] 인사 생성 오류: %s", self.call_id, e)
             greeting = "안녕하세요! 무엇을 도와드릴까요?"
 
+        log.info("[%s] 첫 인사: %s", self.call_id, greeting)
         await bus.publish(self.call_id, "agent", text=greeting, phase="greeting")
         await self._speak(greeting)
 
     # ── Twilio 오디오 수신 ──────────────────────
     async def receive_audio(self, payload_b64: str) -> None:
-        # TTS 재생 중에도 STT 스트림은 유지 (끊기면 재시작 비용 발생)
-        # 발화 콜백(_on_utterance)에서 _speaking 체크로 처리
+        self._audio_count = getattr(self, "_audio_count", 0) + 1
+        if self._audio_count == 1:
+            log.info("[%s] Twilio 오디오 첫 수신", self.call_id)
+        if self._audio_count % 500 == 0:
+            log.info("[%s] Twilio 오디오 누적: %d 청크", self.call_id, self._audio_count)
         await self._stt.send_audio(base64.b64decode(payload_b64))
 
     # ── STT 발화 완성 ───────────────────────────
