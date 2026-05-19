@@ -5,13 +5,14 @@ Google Cloud STT 스트리밍 어댑터.
 
 주요 특이사항:
   - Google STT 단일 스트림 최대 5분 → 자동 재시작
-  - TTS 재생 중에도 STT 스트림은 유지 (오디오만 무시)
+  - 오류 시 지수 백오프 재시작 (1s → 2s → 4s → 최대 16s)
   - gRPC 동기 스트림을 별도 스레드에서 실행
 """
-import asyncio
 import logging
 import queue
 import threading
+import time
+import asyncio
 from typing import Callable, Awaitable
 
 from google.cloud import speech
@@ -21,13 +22,14 @@ from app.core.interfaces import STTProvider
 log = logging.getLogger(__name__)
 
 STREAM_RESTART_SECS = 240   # 4분마다 재시작 (Google 5분 제한 전)
+MAX_QUEUE_SIZE      = 200   # 큐 최대 크기 (오디오 유실 방지)
 
 
 class GoogleSTT(STTProvider):
 
     def __init__(self):
         self._client  = speech.SpeechClient()
-        self._audio_q: queue.Queue[bytes | None] = queue.Queue()
+        self._audio_q: queue.Queue[bytes | None] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
         self._on_utterance: Callable[[str], Awaitable[None]] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._running  = False
@@ -37,38 +39,50 @@ class GoogleSTT(STTProvider):
         self._on_utterance = on_utterance
         self._loop = asyncio.get_event_loop()
         self._running = True
-        self._start_thread()
-        log.info("Google STT 시작")
-
-    def _start_thread(self):
         self._thread = threading.Thread(target=self._stream_loop, daemon=True)
         self._thread.start()
+        log.info("Google STT 시작")
 
     async def send_audio(self, chunk: bytes) -> None:
-        if self._running:
-            self._audio_q.put(chunk)
+        if not self._running:
+            return
+        try:
+            self._audio_q.put_nowait(chunk)
+        except queue.Full:
+            # 큐가 가득 차면 가장 오래된 것 버리고 새 것 삽입
+            try:
+                self._audio_q.get_nowait()
+                self._audio_q.put_nowait(chunk)
+            except queue.Empty:
+                pass
 
     async def close(self) -> None:
         self._running = False
-        self._audio_q.put(None)
+        try:
+            self._audio_q.put_nowait(None)
+        except queue.Full:
+            pass
         if self._thread:
             self._thread.join(timeout=3)
         log.info("Google STT 종료")
 
-    # ── 내부 스트림 루프 (스레드) ────────────────
+    # ── 내부 스트림 루프 ─────────────────────────
     def _stream_loop(self):
-        """5분 제한 전 자동 재시작하는 루프"""
+        """오류 시 지수 백오프로 재시작"""
+        backoff = 1
         while self._running:
             try:
                 self._run_once()
+                backoff = 1   # 성공 시 리셋
             except Exception as e:
-                if self._running:
-                    log.error("STT 스트림 오류, 재시작: %s", e)
-                    threading.Event().wait(1)  # 1초 대기 후 재시작
+                if not self._running:
+                    break
+                log.error("STT 스트림 오류 (%.0f초 후 재시작): %s", backoff, e)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 16)   # 최대 16초
 
     def _run_once(self):
-        """단일 스트리밍 세션 실행 (최대 STREAM_RESTART_SECS 초)"""
-        import time
+        """단일 스트리밍 세션 (최대 STREAM_RESTART_SECS초)"""
         start = time.time()
 
         config = speech.RecognitionConfig(
@@ -85,10 +99,9 @@ class GoogleSTT(STTProvider):
 
         def audio_gen():
             while self._running:
-                elapsed = time.time() - start
-                if elapsed >= STREAM_RESTART_SECS:
-                    log.info("STT 스트림 갱신 (%.0f초 경과)", elapsed)
-                    return   # 루프 재시작 트리거
+                if time.time() - start >= STREAM_RESTART_SECS:
+                    log.info("STT 스트림 갱신")
+                    return
                 try:
                     chunk = self._audio_q.get(timeout=1)
                     if chunk is None:
@@ -97,12 +110,8 @@ class GoogleSTT(STTProvider):
                 except queue.Empty:
                     continue
 
-        try:
-            responses = self._client.streaming_recognize(streaming_config, audio_gen())
-            self._process(responses)
-        except Exception as e:
-            if self._running:
-                raise
+        responses = self._client.streaming_recognize(streaming_config, audio_gen())
+        self._process(responses)
 
     def _process(self, responses):
         buffer = ""
