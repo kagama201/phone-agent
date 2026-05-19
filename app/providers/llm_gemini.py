@@ -31,6 +31,21 @@ class GeminiLLM(LLMProvider):
             system_instruction=settings.system_prompt,
         )
 
+    async def chat_with_system(self, system: str, history: list[dict]) -> str:
+        """시스템 프롬프트 동적 지정 — Gemini 네이티브 방식"""
+        model = genai.GenerativeModel(
+            model_name=settings.gemini_model,
+            system_instruction=system,
+        )
+        gemini_history = []
+        msgs = history[:-1]
+        for msg in msgs:
+            role = "model" if msg["role"] == "assistant" else "user"
+            gemini_history.append({"role": role, "parts": [msg["content"]]})
+        chat = model.start_chat(history=gemini_history)
+        resp = await chat.send_message_async(history[-1]["content"])
+        return resp.text.strip()
+
     async def chat(self, history: list[dict]) -> str:
         """
         history: [{"role": "user"|"assistant", "content": "..."}]
