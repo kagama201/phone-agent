@@ -3,16 +3,16 @@ app/providers/stt_google.py
 ────────────────────────────
 Google Cloud STT 스트리밍 어댑터.
 
-주요 특이사항:
-  - Google STT 단일 스트림 최대 5분 → 자동 재시작
-  - 오류 시 지수 백오프 재시작 (1s → 2s → 4s → 최대 16s)
-  - gRPC 동기 스트림을 별도 스레드에서 실행
+핵심 변경:
+  - single_utterance=True 제거 → 연속 대화 가능
+  - 침묵 타임아웃(1.5초) 직접 구현 → is_final 안 와도 발화 확정
+  - 중간 인식 텍스트가 1.5초 동안 변하지 않으면 발화 완료로 처리
 """
+import asyncio
 import logging
 import queue
 import threading
 import time
-import asyncio
 from typing import Callable, Awaitable
 
 from google.cloud import speech
@@ -21,8 +21,9 @@ from app.core.interfaces import STTProvider
 
 log = logging.getLogger(__name__)
 
-STREAM_RESTART_SECS = 240   # 4분마다 재시작 (Google 5분 제한 전)
-MAX_QUEUE_SIZE      = 200   # 큐 최대 크기 (오디오 유실 방지)
+STREAM_RESTART_SECS = 240
+MAX_QUEUE_SIZE      = 200
+SILENCE_TIMEOUT     = 1.5   # 초 — 중간 인식 후 이 시간 동안 변화 없으면 발화 완료
 
 
 class GoogleSTT(STTProvider):
@@ -49,7 +50,6 @@ class GoogleSTT(STTProvider):
         try:
             self._audio_q.put_nowait(chunk)
         except queue.Full:
-            # 큐가 가득 차면 가장 오래된 것 버리고 새 것 삽입
             try:
                 self._audio_q.get_nowait()
                 self._audio_q.put_nowait(chunk)
@@ -66,23 +66,20 @@ class GoogleSTT(STTProvider):
             self._thread.join(timeout=3)
         log.info("Google STT 종료")
 
-    # ── 내부 스트림 루프 ─────────────────────────
     def _stream_loop(self):
-        """오류 시 지수 백오프로 재시작"""
         backoff = 1
         while self._running:
             try:
                 self._run_once()
-                backoff = 1   # 성공 시 리셋
+                backoff = 1
             except Exception as e:
                 if not self._running:
                     break
                 log.error("STT 스트림 오류 (%.0f초 후 재시작): %s", backoff, e)
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 16)   # 최대 16초
+                backoff = min(backoff * 2, 16)
 
     def _run_once(self):
-        """단일 스트리밍 세션 (최대 STREAM_RESTART_SECS초)"""
         start = time.time()
 
         config = speech.RecognitionConfig(
@@ -90,7 +87,7 @@ class GoogleSTT(STTProvider):
             sample_rate_hertz=8000,
             language_code="ko-KR",
             enable_automatic_punctuation=True,
-            model="default",     # ko-KR 지원 모델
+            model="default",
         )
         streaming_config = speech.StreamingRecognitionConfig(
             config=config,
@@ -118,34 +115,66 @@ class GoogleSTT(STTProvider):
 
         log.info("STT streaming_recognize 시작")
         responses = self._client.streaming_recognize(streaming_config, audio_gen())
-        log.info("STT 응답 스트림 연결됨")
         self._process(responses)
 
     def _process(self, responses):
-        buffer = ""
+        """
+        is_final=True가 오면 즉시 발화 처리.
+        안 오면 SILENCE_TIMEOUT 초 동안 텍스트 변화 없으면 발화 완료로 처리.
+        """
+        last_interim   = ""
+        last_change_t  = time.time()
+        silence_timer  = None
+
+        def _fire(text: str):
+            """발화 콜백 호출"""
+            if text and self._on_utterance and self._loop:
+                log.info("STT 발화: %s", text)
+                asyncio.run_coroutine_threadsafe(
+                    self._on_utterance(text), self._loop
+                )
+
+        def _check_silence():
+            """별도 스레드에서 침묵 타임아웃 감시"""
+            nonlocal last_interim, last_change_t
+            while self._running:
+                time.sleep(0.1)
+                if last_interim and (time.time() - last_change_t) >= SILENCE_TIMEOUT:
+                    text = last_interim
+                    last_interim  = ""
+                    last_change_t = time.time()
+                    _fire(text)
+
+        # 침묵 감시 스레드 시작
+        silence_t = threading.Thread(target=_check_silence, daemon=True)
+        silence_t.start()
+
         resp_count = 0
-        for response in responses:
-            if not self._running:
-                break
-            resp_count += 1
-            if resp_count == 1:
-                log.info("STT 첫 응답 수신 (results=%d)", len(response.results))
-            if not response.results:
-                continue
-            for result in response.results:
-                if not result.alternatives:
-                    continue
-                transcript = result.alternatives[0].transcript.strip()
-                log.debug("STT interim: is_final=%s text=%s", result.is_final, transcript)
-                if transcript and not result.is_final:
-                    log.info("STT 중간 인식: %s", transcript)
-                if result.is_final and transcript:
-                    buffer += " " + transcript
-                    full = buffer.strip()
-                    buffer = ""
-                    if full and self._on_utterance and self._loop:
-                        log.info("STT 발화: %s", full)
-                        asyncio.run_coroutine_threadsafe(
-                            self._on_utterance(full), self._loop
-                        )
-        log.info("STT _process 종료 (총 응답: %d)", resp_count)
+        try:
+            for response in responses:
+                if not self._running:
+                    break
+                resp_count += 1
+                if resp_count == 1:
+                    log.info("STT 첫 응답 수신")
+
+                for result in response.results:
+                    if not result.alternatives:
+                        continue
+                    transcript = result.alternatives[0].transcript.strip()
+                    if not transcript:
+                        continue
+
+                    if result.is_final:
+                        # is_final이 오면 즉시 처리
+                        last_interim  = ""
+                        last_change_t = time.time()
+                        _fire(transcript)
+                    else:
+                        # 중간 결과 — 침묵 타임아웃으로 처리
+                        if transcript != last_interim:
+                            last_interim  = transcript
+                            last_change_t = time.time()
+                            log.info("STT 중간 인식: %s", transcript)
+        finally:
+            log.info("STT _process 종료 (총 응답: %d)", resp_count)
