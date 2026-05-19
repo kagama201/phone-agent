@@ -36,6 +36,12 @@ class GoogleTTS(TTSProvider):
             audio_config=self._audio_config,
         )
         resp = await self._client.synthesize_speech(request=req)
-        mulaw = audioop.lin2ulaw(resp.audio_content, 2)
-        log.debug("TTS 완료: %d bytes", len(mulaw))
+
+        # LINEAR16 응답에는 WAV 헤더(44바이트)가 포함됨 — 제거 후 변환
+        raw_pcm = resp.audio_content
+        if raw_pcm[:4] == b"RIFF":   # WAV 헤더 감지
+            raw_pcm = raw_pcm[44:]
+
+        mulaw = audioop.lin2ulaw(raw_pcm, 2)
+        log.debug("TTS 완료: %d bytes (pcm) → %d bytes (mulaw)", len(raw_pcm), len(mulaw))
         return mulaw
