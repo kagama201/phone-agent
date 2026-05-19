@@ -64,7 +64,11 @@ async def media_stream(ws: WebSocket):
                 asyncio.create_task(agent.start())
 
             elif event == "media" and agent:
-                await agent.receive_audio(data["media"]["payload"])
+                # both_tracks 모드: track 필드로 inbound(사용자)만 STT 전달
+                # outbound(에이전트 TTS)는 에코이므로 무시
+                track = data["media"].get("track", "inbound")
+                if track == "inbound":
+                    await agent.receive_audio(data["media"]["payload"])
 
             elif event == "stop":
                 log.info("통화 종료: %s", stream_sid)
