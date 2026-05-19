@@ -237,14 +237,14 @@ class MultiAgentRunner:
         )
 
     async def _direct_answer(self, user_text: str, history: list[dict], main: MainAgentConfig) -> str:
-        simple_prompt = "당신은 친절한 AI 안내사 '아리'입니다. 2~3문장으로 자연스럽게 답변하세요."
+        simple_prompt = main.prompt.split("\n")[0] + "\n2~3문장으로 자연스럽게 답변하세요."
         msgs = list(history[-6:]) + [{"role": "user", "content": user_text}]
         return await self._llm.chat_with_system(simple_prompt, msgs)
 
     async def _synthesize(self, user_text: str, results: list[dict], main: MainAgentConfig) -> str:
         """서브 에이전트 결과 취합 → 최종 자연스러운 답변"""
         context = "\n\n".join(f"[{r['name']}]\n{r['answer']}" for r in results)
-        synth_prompt = f"""당신은 AI 안내사 '아리'입니다.
+        synth_prompt = f"""{design.main.prompt.split(chr(10))[0]}
 아래 전문가들의 답변을 자연스럽게 통합해 사용자에게 3~4문장으로 안내하세요.
 중복 내용은 제거하고, 가장 유용한 정보 위주로 정리하세요.
 

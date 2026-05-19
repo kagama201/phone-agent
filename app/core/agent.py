@@ -39,7 +39,17 @@ class CallAgent:
     async def start(self) -> None:
         await self._stt.connect(on_utterance=self._on_utterance)
         log.info("[%s] 에이전트 시작 (LLM: %s)", self.call_id, settings.llm_provider)
-        await self._speak("안녕하세요! AI 상담사 아리입니다. 무엇을 도와드릴까요?")
+        # 첫 인사를 LLM이 메인 프롬프트 기반으로 생성
+        from app.core.multi_agent import get_design
+        design = get_design()
+        try:
+            greeting = await self._llm.chat_with_system(
+                design.main.prompt,
+                [{"role": "user", "content": "전화가 연결됐어. 첫 인사를 해줘. 한 문장으로."}],
+            )
+        except Exception:
+            greeting = "안녕하세요! 무엇을 도와드릴까요?"
+        await self._speak(greeting)
 
     # ── Twilio 오디오 청크 수신 ─────────────────
     async def receive_audio(self, payload_b64: str) -> None:
