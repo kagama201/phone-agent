@@ -121,11 +121,13 @@ class CallAgent:
         await bus.publish(self.call_id, "tts_start", text=text)
         try:
             mulaw = await self._tts.synthesize(text)
-            chunk_size = 160 * 10
+            # Twilio 권장: 160바이트(20ms) 단위로 전송
+            # 너무 크게 보내면 버퍼 오버플로 → 무음 발생
+            chunk_size = 160
             for i in range(0, len(mulaw), chunk_size):
                 b64 = base64.b64encode(mulaw[i:i + chunk_size]).decode()
                 await self._send_audio(self.stream_sid, b64)
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.02)   # 20ms 간격 — 실시간 재생 속도 맞춤
         except Exception as e:
             log.error("[%s] TTS 오류: %s", self.call_id, e)
         finally:
