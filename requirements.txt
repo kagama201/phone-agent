@@ -17,3 +17,10 @@ google-cloud-texttospeech==2.24.0
 
 # ── HTTP ─────────────────────────────────────────
 httpx==0.28.1
+
+# ── ADDED ─────────────────────────────────────────
+GET  /prompt          에이전트 설계 UI
+GET  /prompt/design   현재 설계 조회 (JSON)
+POST /prompt/design   설계 저장
+POST /prompt/reset    기본값으로 초기화
+POST /prompt/run      멀티에이전트 실행 (SSE 스트리밍)
