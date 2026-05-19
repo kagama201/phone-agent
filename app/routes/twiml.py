@@ -1,12 +1,7 @@
 """
 app/routes/twiml.py
-────────────────────
-전화 수신 Webhook. TwiML로 양방향 미디어 스트림 설정.
-
-핵심:
-  track="both_tracks"  — 수신(사용자) + 송신(에이전트) 모두 스트리밍
-  <Parameter>          — Twilio가 WS start 이벤트에 메타데이터 포함
 """
+import os
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
@@ -15,16 +10,21 @@ router = APIRouter()
 
 @router.post("/incoming-call")
 async def incoming_call(request: Request):
-    host   = request.headers.get("host", "localhost")
-    scheme = "wss" if request.url.scheme == "https" else "ws"
-    ws_url = f"{scheme}://{host}/media-stream"
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 
-    # 발신자 번호를 WS start 이벤트에 전달
+    if base_url:
+        ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://")
+        ws_url = f"{ws_url}/media-stream"
+    else:
+        host  = request.headers.get("host", "localhost")
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        scheme = "wss" if proto == "https" else "ws"
+        ws_url = f"{scheme}://{host}/media-stream"
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="ko-KR">잠시만 기다려 주세요.</Say>
     <Connect>
-        <Stream url="{ws_url}" track="both_tracks">
+        <Stream url="{ws_url}">
             <Parameter name="From" value="{{{{From}}}}"/>
         </Stream>
     </Connect>
