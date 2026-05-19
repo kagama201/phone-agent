@@ -138,9 +138,8 @@ async def list_all_designs():
 @router.post("/design/{name}")
 async def save_named_design(name: str, body: DesignSchema):
     """현재 설계를 특정 이름으로 저장 (스냅샷)"""
-    d = schema_to_design(body)
     from app.db.design_store import save_design as _save
-    _save(design_to_schema(DesignSchema(**design_to_schema(d))), name)
+    _save(body.model_dump(), name)
     return {"status": "saved", "name": name}
 
 
