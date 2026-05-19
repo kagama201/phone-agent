@@ -302,7 +302,7 @@ class MultiAgentRunner:
     async def _synthesize(self, user_text: str, results: list[dict], main: MainAgentConfig) -> str:
         """서브 에이전트 결과 취합 → 최종 자연스러운 답변"""
         context = "\n\n".join(f"[{r['name']}]\n{r['answer']}" for r in results)
-        synth_prompt = f"""{design.main.prompt.split(chr(10))[0]}
+        synth_prompt = f"""{main.prompt.split(chr(10))[0]}
 아래 전문가들의 답변을 자연스럽게 통합해 사용자에게 3~4문장으로 안내하세요.
 중복 내용은 제거하고, 가장 유용한 정보 위주로 정리하세요.
 
