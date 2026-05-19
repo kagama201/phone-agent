@@ -4,6 +4,7 @@ services:
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: bash render_startup.sh
+    port: 10000
     plan: free
 
     envVars:
