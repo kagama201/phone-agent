@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from app.providers.factory import get_llm
+from app.db.design_store import save_design, load_design
 
 log = logging.getLogger(__name__)
 
@@ -120,17 +121,74 @@ JSON 없이 문장만 출력하세요.""",
     ],
 )
 
-# 런타임 설계 저장소 (서버 재시작 시 초기화 — 향후 DB로 교체)
-_current_design: AgentDesign = DEFAULT_DESIGN
+# 런타임 캐시 (DB 로드 후 메모리 캐싱)
+_current_design: AgentDesign | None = None
+
+
+def _design_to_dict(d: AgentDesign) -> dict:
+    return {
+        "main": {
+            "prompt": d.main.prompt,
+            "smalltalk_prompt": d.main.smalltalk_prompt,
+            "max_sub_agents": d.main.max_sub_agents,
+        },
+        "sub_agents": [
+            {
+                "id": a.id, "name": a.name,
+                "description": a.description, "prompt": a.prompt,
+                "enabled": a.enabled, "next_agents": a.next_agents,
+            }
+            for a in d.sub_agents
+        ],
+    }
+
+
+def _dict_to_design(d: dict) -> AgentDesign:
+    m = d["main"]
+    return AgentDesign(
+        main=MainAgentConfig(
+            prompt=m["prompt"],
+            smalltalk_prompt=m["smalltalk_prompt"],
+            max_sub_agents=m.get("max_sub_agents", 3),
+        ),
+        sub_agents=[
+            SubAgentConfig(
+                id=a["id"], name=a["name"],
+                description=a["description"], prompt=a["prompt"],
+                enabled=a.get("enabled", True),
+                next_agents=a.get("next_agents", []),
+            )
+            for a in d.get("sub_agents", [])
+        ],
+    )
 
 
 def get_design() -> AgentDesign:
+    """DB에서 로드 (캐시 우선). DB에 없으면 DEFAULT_DESIGN 반환."""
+    global _current_design
+    if _current_design is not None:
+        return _current_design
+    try:
+        data = load_design("default")
+        if data:
+            _current_design = _dict_to_design(data)
+            return _current_design
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("설계 DB 로드 실패, 기본값 사용: %s", e)
+    _current_design = DEFAULT_DESIGN
     return _current_design
 
 
 def set_design(design: AgentDesign) -> None:
+    """메모리 캐시 + DB 동시 저장."""
     global _current_design
     _current_design = design
+    try:
+        save_design(_design_to_dict(design), "default")
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error("설계 DB 저장 실패: %s", e)
 
 
 # ── 멀티에이전트 실행 ────────────────────────────

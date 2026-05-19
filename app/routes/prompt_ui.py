@@ -100,9 +100,21 @@ input[type=number]{width:70px;padding:6px 8px;border:1px solid #e5e5ea;border-ra
   <span class="badge" id="saveBadge">미저장</span>
   <div class="spacer"></div>
   <button class="btn" onclick="resetDesign()">초기화</button>
+  <button class="btn" onclick="toggleSnapPanel()">스냅샷 ▾</button>
   <button class="btn primary" onclick="saveDesign()">저장 적용</button>
 </header>
 
+<div id="snapPanel" style="display:none;padding:10px 20px;background:var(--color-background-secondary,#f5f5f5);border-bottom:1px solid #e5e5ea;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+  <input type="text" id="snapName" placeholder="스냅샷 이름" style="font-size:13px;padding:5px 10px;border:1px solid #e5e5ea;border-radius:6px;width:160px">
+  <button class="btn small" onclick="saveSnapshot()">저장</button>
+  <span style="color:#c7c7cc">|</span>
+  <select id="snapList" style="font-size:13px;padding:5px 8px;border:1px solid #e5e5ea;border-radius:6px">
+    <option value="">-- 불러오기 --</option>
+  </select>
+  <button class="btn small" onclick="applySnapshot()">적용</button>
+  <button class="btn small danger" onclick="deleteSnapshot()">삭제</button>
+  <span id="snapStatus" style="font-size:12px;color:#8e8e93"></span>
+</div>
 <div class="layout">
   <!-- ── 설계 패널 ── -->
   <div class="design-panel">
@@ -172,6 +184,59 @@ let chatHistory = [];
 let busy = false;
 
 // ── 초기 로드 ─────────────────────────────────
+function toggleSnapPanel() {
+  const p = document.getElementById('snapPanel');
+  p.style.display = p.style.display === 'none' ? 'flex' : 'none';
+  if (p.style.display === 'flex') loadSnapList();
+}
+
+async function loadSnapList() {
+  const r = await fetch('/prompt/designs');
+  const d = await r.json();
+  const sel = document.getElementById('snapList');
+  sel.innerHTML = '<option value="">-- 불러오기 --</option>';
+  (d.designs || []).forEach(s => {
+    const opt = document.createElement('option');
+    opt.value = s.name;
+    opt.textContent = s.name + ' (' + s.updated.slice(0,16) + ')';
+    sel.appendChild(opt);
+  });
+}
+
+async function saveSnapshot() {
+  const name = document.getElementById('snapName').value.trim();
+  if (!name) { alert('스냅샷 이름을 입력하세요.'); return; }
+  const d = collectDesign();
+  const r = await fetch('/prompt/design/' + encodeURIComponent(name), {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(d),
+  });
+  const st = document.getElementById('snapStatus');
+  if (r.ok) { st.textContent = '저장됨: ' + name; loadSnapList(); }
+  else { st.textContent = '저장 실패'; }
+}
+
+async function applySnapshot() {
+  const name = document.getElementById('snapList').value;
+  if (!name) { alert('불러올 스냅샷을 선택하세요.'); return; }
+  const r = await fetch('/prompt/design/' + encodeURIComponent(name) + '/apply', { method: 'POST' });
+  if (r.ok) {
+    await loadDesign();
+    document.getElementById('snapStatus').textContent = '적용됨: ' + name;
+    markSaved();
+  }
+}
+
+async function deleteSnapshot() {
+  const name = document.getElementById('snapList').value;
+  if (!name) { alert('삭제할 스냅샷을 선택하세요.'); return; }
+  if (name === 'default') { alert('default는 삭제할 수 없습니다.'); return; }
+  if (!confirm(name + ' 스냅샷을 삭제할까요?')) return;
+  await fetch('/prompt/design/' + encodeURIComponent(name), { method: 'DELETE' });
+  document.getElementById('snapStatus').textContent = '삭제됨: ' + name;
+  loadSnapList();
+}
+
 async function loadDesign() {
   const res = await fetch('/prompt/design');
   design = await res.json();

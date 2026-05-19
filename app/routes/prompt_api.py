@@ -16,6 +16,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.db.design_store import list_designs, delete_design, load_design, save_design
 from app.core.multi_agent import (
     AgentDesign, MainAgentConfig, SubAgentConfig,
     DEFAULT_DESIGN, get_design, set_design, MultiAgentRunner,
@@ -124,3 +125,55 @@ async def run_agent(body: RunRequest):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ── 설계 목록 조회 ────────────────────────────────
+@router.get("/designs")
+async def list_all_designs():
+    """저장된 설계 이름 목록 반환"""
+    return {"designs": list_designs()}
+
+
+# ── 이름 붙여 저장 ────────────────────────────────
+@router.post("/design/{name}")
+async def save_named_design(name: str, body: DesignSchema):
+    """현재 설계를 특정 이름으로 저장 (스냅샷)"""
+    d = schema_to_design(body)
+    from app.db.design_store import save_design as _save
+    _save(design_to_schema(DesignSchema(**design_to_schema(d))), name)
+    return {"status": "saved", "name": name}
+
+
+# ── 이름으로 불러오기 ──────────────────────────────
+@router.get("/design/{name}")
+async def load_named_design(name: str):
+    """저장된 특정 설계 로드"""
+    data = load_design(name)
+    if not data:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"설계 '{name}'을 찾을 수 없습니다.")
+    return data
+
+
+# ── 이름으로 삭제 ──────────────────────────────────
+@router.delete("/design/{name}")
+async def delete_named_design(name: str):
+    """저장된 설계 삭제 (default는 삭제 불가)"""
+    ok = delete_design(name)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="default 설계는 삭제할 수 없습니다.")
+    return {"status": "deleted", "name": name}
+
+
+# ── 이름으로 불러와서 현재 설계로 적용 ────────────────
+@router.post("/design/{name}/apply")
+async def apply_named_design(name: str):
+    """저장된 설계를 현재 활성 설계로 적용"""
+    data = load_design(name)
+    if not data:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"설계 '{name}'을 찾을 수 없습니다.")
+    from app.core.multi_agent import _dict_to_design, set_design
+    set_design(_dict_to_design(data))
+    return {"status": "applied", "name": name}

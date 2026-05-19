@@ -15,10 +15,12 @@ import os
 import uvicorn
 from fastapi import FastAPI
 
+from app.db.design_store     import init_db
 from app.routes.test_ui      import router as ui_router
 from app.routes.chat         import router as chat_router
 from app.routes.prompt_ui    import router as prompt_ui_router
 from app.routes.prompt_api   import router as prompt_api_router
+from app.routes.locate       import router as locate_router
 from app.routes.twiml        import router as twiml_router
 from app.routes.media_stream import router as ws_router, active_call_count
 
@@ -27,13 +29,21 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-app = FastAPI(title="Phone AI Agent", version="0.1.0")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    yield
+
+app = FastAPI(title="Phone AI Agent", version="0.1.0", lifespan=lifespan)
 
 # ── 통신망 불필요 (에이전트 로직 테스트) ──
 app.include_router(ui_router)
 app.include_router(chat_router)
 app.include_router(prompt_ui_router)
 app.include_router(prompt_api_router)
+app.include_router(locate_router)
 
 # ── 통신망 필요 (Twilio 연동) ──────────────
 app.include_router(twiml_router)
