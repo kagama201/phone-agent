@@ -37,8 +37,10 @@ class CallEventBus:
     # ── 구독 관리 ────────────────────────────────
     async def subscribe(self, ws: WebSocket) -> None:
         self._subscribers.add(ws)
-        # 현재 진행 중인 모든 통화 히스토리 즉시 전송
+        # 활성 통화 히스토리만 전송 (종료된 통화 제외)
         for call_id, events in self._history.items():
+            if call_id not in self._active_calls:
+                continue   # 이미 종료된 통화는 복원 안 함
             for ev in events:
                 try:
                     await ws.send_text(json.dumps(ev, ensure_ascii=False))
@@ -81,8 +83,19 @@ class CallEventBus:
 
     async def call_end(self, call_id: str) -> None:
         self._active_calls.pop(call_id, None)
-        self._history.pop(call_id, None)
+        # publish 먼저 → 브라우저가 종료 이벤트 수신 후
         await self.publish(call_id, "call_end")
+        # 히스토리는 30초 후 정리 (브라우저 재연결 시 복원 가능하도록)
+        import asyncio as _asyncio
+        async def _cleanup():
+            await _asyncio.sleep(30)
+            self._history.pop(call_id, None)
+        try:
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(_cleanup())
+        except Exception:
+            self._history.pop(call_id, None)
 
     # ── 상태 조회 ────────────────────────────────
     def get_active_calls(self) -> dict:
