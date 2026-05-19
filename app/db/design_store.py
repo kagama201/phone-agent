@@ -59,7 +59,9 @@ def init_db() -> None:
 
 # ── 설계 저장/로드 ─────────────────────────────
 def save_design(data: dict, name: str = "default") -> None:
-    """설계 딕셔너리를 JSON으로 직렬화해 저장 (upsert)"""
+    """설계 딕셔너리를 JSON으로 직렬화해 저장 (upsert)
+    default 설계는 DESIGN_JSON 환경변수에도 백업 → 재배포 후 복원 가능
+    """
     blob = json.dumps(data, ensure_ascii=False)
     with _conn() as con:
         existing = con.execute(
@@ -76,6 +78,37 @@ def save_design(data: dict, name: str = "default") -> None:
                 (name, blob),
             )
     log.info("설계 저장 완료: %s", name)
+
+    # default 설계는 Render 환경변수에도 백업
+    # (재배포 시 /tmp 초기화 대응 — Render API로 업데이트)
+    if name == "default":
+        _backup_to_render(blob)
+
+
+def _backup_to_render(blob: str) -> None:
+    """Render API로 DESIGN_JSON 환경변수 업데이트 (비동기 시도, 실패 무시)"""
+    render_api_key   = os.getenv("RENDER_API_KEY", "")
+    render_service_id = os.getenv("RENDER_SERVICE_ID", "")
+    if not render_api_key or not render_service_id:
+        return  # 환경변수 미설정 시 무시
+    try:
+        import urllib.request, urllib.error
+        import json as _json
+        url = f"https://api.render.com/v1/services/{render_service_id}/env-vars"
+        payload = _json.dumps([
+            {"key": "DESIGN_JSON", "value": blob}
+        ]).encode()
+        req = urllib.request.Request(
+            url, data=payload, method="PUT",
+            headers={
+                "Authorization": f"Bearer {render_api_key}",
+                "Content-Type": "application/json",
+            }
+        )
+        urllib.request.urlopen(req, timeout=5)
+        log.info("Render 환경변수 DESIGN_JSON 백업 완료")
+    except Exception as e:
+        log.warning("Render 환경변수 백업 실패 (무시): %s", e)
 
 
 def load_design(name: str = "default") -> dict | None:
