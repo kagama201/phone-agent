@@ -116,18 +116,29 @@ class GoogleSTT(STTProvider):
                 except queue.Empty:
                     continue
 
+        log.info("STT streaming_recognize 시작")
         responses = self._client.streaming_recognize(streaming_config, audio_gen())
+        log.info("STT 응답 스트림 연결됨")
         self._process(responses)
 
     def _process(self, responses):
         buffer = ""
+        resp_count = 0
         for response in responses:
             if not self._running:
                 break
+            resp_count += 1
+            if resp_count == 1:
+                log.info("STT 첫 응답 수신 (results=%d)", len(response.results))
+            if not response.results:
+                continue
             for result in response.results:
                 if not result.alternatives:
                     continue
                 transcript = result.alternatives[0].transcript.strip()
+                log.debug("STT interim: is_final=%s text=%s", result.is_final, transcript)
+                if transcript and not result.is_final:
+                    log.info("STT 중간 인식: %s", transcript)
                 if result.is_final and transcript:
                     buffer += " " + transcript
                     full = buffer.strip()
@@ -137,3 +148,4 @@ class GoogleSTT(STTProvider):
                         asyncio.run_coroutine_threadsafe(
                             self._on_utterance(full), self._loop
                         )
+        log.info("STT _process 종료 (총 응답: %d)", resp_count)
