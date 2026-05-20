@@ -45,15 +45,21 @@ def init_db() -> None:
         """)
         con.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
-                session_id   TEXT PRIMARY KEY,
-                phone_number TEXT,
-                location_lat REAL,
-                location_lng REAL,
-                pending_dest TEXT,
-                created      TEXT NOT NULL DEFAULT (datetime('now')),
-                updated      TEXT NOT NULL DEFAULT (datetime('now'))
+                session_id        TEXT PRIMARY KEY,
+                phone_number      TEXT,
+                location_lat      REAL,
+                location_lng      REAL,
+                pending_dest      TEXT,
+                last_directions   TEXT,
+                created           TEXT NOT NULL DEFAULT (datetime('now')),
+                updated           TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        # 기존 DB에 컬럼 없으면 추가 (마이그레이션)
+        try:
+            con.execute("ALTER TABLE sessions ADD COLUMN last_directions TEXT")
+        except Exception:
+            pass
     log.info("DB 초기화 완료: %s", DB_PATH)
 
 
