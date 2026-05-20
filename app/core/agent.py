@@ -37,6 +37,7 @@ class CallAgent:
         self._phone      = phone
         self._history: list[dict] = []
         self._speaking   = False
+        self._connected  = True   # WS 연결 상태
 
     # ── 시작 ───────────────────────────────────
     async def start(self) -> None:
@@ -156,11 +157,21 @@ class CallAgent:
             # 160바이트(20ms) 단위 전송
             # sleep 없이 전송 — Twilio가 버퍼링 처리
             chunk_size = 160
+            sent = 0
             for i in range(0, len(mulaw), chunk_size):
+                if not self._connected:
+                    log.info("[%s] WS 종료 — TTS 전송 중단", self.call_id)
+                    break
                 b64 = base64.b64encode(mulaw[i:i + chunk_size]).decode()
-                await self._send_audio(self.stream_sid, b64)
+                try:
+                    await self._send_audio(self.stream_sid, b64)
+                    sent += 1
+                except Exception:
+                    self._connected = False
+                    log.info("[%s] WS 전송 실패 — 연결 종료 처리", self.call_id)
+                    break
 
-            log.info("[%s] TTS 전송 완료 (%d 청크)", self.call_id, len(mulaw) // chunk_size)
+            log.info("[%s] TTS 전송 완료 (%d/%d 청크)", self.call_id, sent, len(mulaw) // chunk_size)
         except Exception as e:
             log.error("[%s] TTS 오류: %s", self.call_id, e)
         finally:
@@ -169,6 +180,7 @@ class CallAgent:
 
     # ── 종료 ───────────────────────────────────
     async def close(self) -> None:
+        self._connected = False   # TTS 전송 즉시 중단
         from app.core.location_agent import unregister_location_callback
         unregister_location_callback(self.call_id)
         await self._stt.close()
