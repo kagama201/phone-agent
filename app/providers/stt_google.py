@@ -3,10 +3,11 @@ app/providers/stt_google.py
 ────────────────────────────
 Google Cloud STT 스트리밍 어댑터.
 
-핵심 변경:
-  - single_utterance=True 제거 → 연속 대화 가능
-  - 침묵 타임아웃(1.5초) 직접 구현 → is_final 안 와도 발화 확정
-  - 중간 인식 텍스트가 1.5초 동안 변하지 않으면 발화 완료로 처리
+핵심:
+  - 발화 완료(is_final 또는 침묵 1.5초) 후 스트림 재시작
+    → 이전 발화가 다음 발화에 누적되는 문제 방지
+  - 4분마다 스트림 갱신 (Google 5분 제한)
+  - 지수 백오프 재시작
 """
 import asyncio
 import logging
@@ -21,9 +22,9 @@ from app.core.interfaces import STTProvider
 
 log = logging.getLogger(__name__)
 
-STREAM_RESTART_SECS = 240
+STREAM_RESTART_SECS = 240   # 4분
 MAX_QUEUE_SIZE      = 200
-SILENCE_TIMEOUT     = 1.5   # 초 — 중간 인식 후 이 시간 동안 변화 없으면 발화 완료
+SILENCE_TIMEOUT     = 1.5   # 발화 완료 판정 침묵 시간(초)
 
 
 class GoogleSTT(STTProvider):
@@ -35,6 +36,8 @@ class GoogleSTT(STTProvider):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._running  = False
         self._thread: threading.Thread | None = None
+        # 발화 완료 후 스트림 재시작 플래그
+        self._restart_event = threading.Event()
 
     async def connect(self, on_utterance: Callable[[str], Awaitable[None]]) -> None:
         self._on_utterance = on_utterance
@@ -66,9 +69,12 @@ class GoogleSTT(STTProvider):
             self._thread.join(timeout=3)
         log.info("Google STT 종료")
 
+    # ── 스트림 루프 ──────────────────────────────
     def _stream_loop(self):
+        """발화 완료 또는 오류 시 스트림 재시작"""
         backoff = 1
         while self._running:
+            self._restart_event.clear()
             try:
                 self._run_once()
                 backoff = 1
@@ -96,9 +102,9 @@ class GoogleSTT(STTProvider):
 
         def audio_gen():
             count = 0
-            while self._running:
+            while self._running and not self._restart_event.is_set():
                 if time.time() - start >= STREAM_RESTART_SECS:
-                    log.info("STT 스트림 갱신")
+                    log.info("STT 스트림 갱신 (4분 경과)")
                     return
                 try:
                     chunk = self._audio_q.get(timeout=1)
@@ -119,40 +125,46 @@ class GoogleSTT(STTProvider):
 
     def _process(self, responses):
         """
-        is_final=True가 오면 즉시 발화 처리.
-        안 오면 SILENCE_TIMEOUT 초 동안 텍스트 변화 없으면 발화 완료로 처리.
+        발화 처리:
+          is_final=True  → 즉시 fire + 스트림 재시작
+          침묵 1.5초     → fire + 스트림 재시작
+        스트림 재시작으로 누적 방지.
         """
-        last_interim   = ""
-        last_change_t  = time.time()
-        silence_timer  = None
+        last_interim  = ""
+        last_change_t = time.time()
+        fired         = False   # 이미 fire된 발화 중복 방지
 
         def _fire(text: str):
-            """발화 콜백 호출"""
-            if text and self._on_utterance and self._loop:
-                log.info("STT 발화: %s", text)
+            nonlocal fired
+            if not text or fired:
+                return
+            fired = True
+            log.info("STT 발화 확정: %s", text)
+            if self._on_utterance and self._loop:
                 asyncio.run_coroutine_threadsafe(
                     self._on_utterance(text), self._loop
                 )
+            # 스트림 재시작 트리거 — 다음 발화는 새 컨텍스트에서 시작
+            self._restart_event.set()
 
-        def _check_silence():
-            """별도 스레드에서 침묵 타임아웃 감시"""
-            nonlocal last_interim, last_change_t
-            while self._running:
+        def _silence_watcher():
+            nonlocal last_interim, last_change_t, fired
+            while self._running and not self._restart_event.is_set():
                 time.sleep(0.1)
-                if last_interim and (time.time() - last_change_t) >= SILENCE_TIMEOUT:
-                    text = last_interim
-                    last_interim  = ""
-                    last_change_t = time.time()
-                    _fire(text)
+                if last_interim and not fired:
+                    elapsed = time.time() - last_change_t
+                    if elapsed >= SILENCE_TIMEOUT:
+                        text = last_interim
+                        last_interim = ""
+                        _fire(text)
 
-        # 침묵 감시 스레드 시작
-        silence_t = threading.Thread(target=_check_silence, daemon=True)
-        silence_t.start()
+        watcher = threading.Thread(target=_silence_watcher, daemon=True)
+        watcher.start()
 
         resp_count = 0
         try:
             for response in responses:
-                if not self._running:
+                if not self._running or self._restart_event.is_set():
                     break
                 resp_count += 1
                 if resp_count == 1:
@@ -166,15 +178,14 @@ class GoogleSTT(STTProvider):
                         continue
 
                     if result.is_final:
-                        # is_final이 오면 즉시 처리
-                        last_interim  = ""
-                        last_change_t = time.time()
+                        last_interim = ""
                         _fire(transcript)
+                        return   # 스트림 재시작 (_run_once 재호출)
                     else:
-                        # 중간 결과 — 침묵 타임아웃으로 처리
                         if transcript != last_interim:
                             last_interim  = transcript
                             last_change_t = time.time()
+                            fired = False   # 새 중간 결과 → 다시 fire 가능
                             log.info("STT 중간 인식: %s", transcript)
         finally:
             log.info("STT _process 종료 (총 응답: %d)", resp_count)
