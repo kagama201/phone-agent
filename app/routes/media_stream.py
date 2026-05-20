@@ -5,11 +5,12 @@ Twilio Media Stream WebSocket + 브라우저 모니터링 WS.
 
   WS /media-stream   Twilio 오디오 스트림
   WS /ws/calls       브라우저 실시간 모니터링 구독
-  GET /calls         활성 통화 목록 (REST)
+  GET /calls         활성 통화 목록
 """
 import asyncio
 import json
 import logging
+import re
 from typing import Dict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -24,7 +25,20 @@ router = APIRouter()
 _active: Dict[str, CallAgent] = {}
 
 
-# ── Twilio 미디어 스트림 ──────────────────────────
+def _normalize_phone(number: str) -> str:
+    """전화번호 E.164 정규화 (+821071373554 형식)"""
+    if not number:
+        return ""
+    cleaned = re.sub(r"[^\d+]", "", number).strip()
+    if cleaned.startswith("+"):
+        return cleaned
+    if cleaned.startswith("82") and len(cleaned) >= 11:
+        return "+" + cleaned
+    if cleaned.startswith("0") and len(cleaned) >= 10:
+        return "+82" + cleaned[1:]
+    return "+" + cleaned if cleaned else ""
+
+
 @router.websocket("/media-stream")
 async def media_stream(ws: WebSocket):
     await ws.accept()
@@ -50,17 +64,23 @@ async def media_stream(ws: WebSocket):
                 meta       = data["start"]
                 stream_sid = meta["streamSid"]
                 call_id    = meta.get("callSid", stream_sid)
-                # 발신자 번호 — WS 쿼리스트링 우선, 없으면 customParameters
+
+                # 발신자 번호 — 우선순위:
+                # 1. WS 쿼리스트링 (?from=+821071373554)
+                # 2. customParameters.CallerPhone (twiml <Parameter>)
+                # 3. customParameters.From
+                # 4. meta.from / meta.From
                 custom = meta.get("customParameters", {})
-                phone  = (
-                    _ws_phone or
-                    custom.get("From") or
-                    meta.get("from") or
-                    meta.get("From") or
-                    ""
+                raw_phone = (
+                    _ws_phone
+                    or custom.get("CallerPhone", "")
+                    or custom.get("From", "")
+                    or meta.get("from", "")
+                    or meta.get("From", "")
                 )
-                log.info("발신자 번호: %s", phone or "(없음)")
-                log.info("통화 시작: %s", call_id)
+                phone = _normalize_phone(raw_phone)
+                log.info("통화 시작: %s | 발신자: %s → 정규화: %s",
+                         call_id, raw_phone or "(없음)", phone or "(없음)")
 
                 agent = CallAgent(
                     call_id       = call_id,
@@ -91,14 +111,12 @@ async def media_stream(ws: WebSocket):
             _active.pop(agent.call_id, None)
 
 
-# ── 브라우저 모니터링 구독 ────────────────────────
 @router.websocket("/ws/calls")
 async def calls_ws(ws: WebSocket):
     await ws.accept()
     await bus.subscribe(ws)
 
     async def ping_loop():
-        """Render 60초 타임아웃 방지 — 30초마다 서버 ping"""
         try:
             while True:
                 await asyncio.sleep(30)
@@ -110,10 +128,9 @@ async def calls_ws(ws: WebSocket):
     try:
         while True:
             try:
-                data = await asyncio.wait_for(ws.receive_text(), timeout=60)
-                # 클라이언트 pong 수신 — 무시
+                await asyncio.wait_for(ws.receive_text(), timeout=60)
             except asyncio.TimeoutError:
-                pass  # 타임아웃은 정상, 계속 유지
+                pass
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -123,7 +140,6 @@ async def calls_ws(ws: WebSocket):
         bus.unsubscribe(ws)
 
 
-# ── 활성 통화 목록 REST ───────────────────────────
 @router.get("/calls")
 async def get_calls():
     return {
