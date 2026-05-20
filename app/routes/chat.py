@@ -102,6 +102,22 @@ async def send_message(session_id: str, body: MessageRequest):
             async for chunk in runner.run(body.text, history[:-1], design):
                 ctype = chunk.get("type")
 
+                # action — send_sms (문자 요청)
+                if ctype == "action" and chunk.get("action") == "send_sms":
+                    action_triggered = True
+                    async def _run_sms():
+                        try:
+                            from app.core.location_agent import send_directions_on_demand
+                            msg = await send_directions_on_demand(session_id)
+                            if q:
+                                await q.put({"type": "agent", "text": msg, "source": "sms"})
+                        except Exception as e:
+                            log.error("send_sms 오류: %s", e)
+                    asyncio.create_task(_run_sms())
+                    sms_msg = {"type": "agent", "text": "📨 상세 길 안내를 문자로 보내드릴게요.", "source": "action"}
+                    yield "data: " + json.dumps(sms_msg, ensure_ascii=False) + "\n\n"
+                    continue
+
                 # action — 위치 요청
                 if ctype == "action" and chunk.get("action") == "request_location":
                     action_triggered = True
