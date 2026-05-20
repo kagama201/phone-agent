@@ -8,12 +8,9 @@ app/core/location_agent.py
   2. SMS로 위치 동의 링크 발송
   3. 사용자가 웹에서 위치 동의 → /locate/{token}으로 전송
   4. locate.py가 on_location_received() 콜백 호출
-  5. 에이전트가 길 안내 생성 후 음성 + SMS로 전달
-
-외부 의존:
-  - app.services.sms         Twilio SMS
-  - app.services.directions  Google Maps
-  - app.db.design_store      세션 위치 저장
+  5. 확인된 위치 주소를 사용자에게 안내
+  6. 목적지가 모호하면 되묻기
+  7. 길 안내 생성 후 음성 + SMS로 전달
 """
 import asyncio
 import logging
@@ -21,14 +18,12 @@ import os
 from typing import Callable, Awaitable
 
 from app.db.design_store import upsert_session, get_session_meta
-from app.services.directions import get_directions
+from app.services.directions import get_directions, reverse_geocode, DestinationNotFoundError
 from app.services.sms import send_location_request, send_directions
 
 log = logging.getLogger(__name__)
 
-# call_id → 콜백 맵 (위치 수신 시 에이전트에 알림)
 _location_callbacks: dict[str, Callable[[float, float], Awaitable[None]]] = {}
-# call_id → 대기 중인 목적지
 _pending_destinations: dict[str, str] = {}
 
 
@@ -37,7 +32,6 @@ def register_location_callback(
     destination: str,
     callback: Callable[[float, float], Awaitable[None]],
 ) -> None:
-    """에이전트가 위치 수신을 기다릴 때 등록"""
     _location_callbacks[call_id] = callback
     _pending_destinations[call_id] = destination
     log.info("[%s] 위치 콜백 등록 (목적지: %s)", call_id, destination)
@@ -49,10 +43,6 @@ def unregister_location_callback(call_id: str) -> None:
 
 
 async def on_location_received(session_id: str, lat: float, lng: float) -> None:
-    """
-    locate.py가 위치를 수신했을 때 호출.
-    session_id = call_id (통화 세션과 동일하게 사용)
-    """
     cb = _location_callbacks.pop(session_id, None)
     if cb:
         log.info("[%s] 위치 수신 → 에이전트 콜백 호출", session_id)
@@ -67,39 +57,48 @@ async def request_location_and_guide(
     destination: str,
     speak_cb: Callable[[str], Awaitable[None]],
 ) -> None:
-    """
-    위치를 모를 때:
-    1. 음성으로 SMS 발송 안내
-    2. SMS 발송
-    3. 위치 수신 대기 (콜백 등록)
-    4. 위치 수신 후 길 안내
-    """
     base_url = os.getenv("RENDER_EXTERNAL_URL", "https://localhost:8000").rstrip("/")
 
     async def on_location(lat: float, lng: float) -> None:
-        """위치 수신 후 길 안내 실행"""
-        await speak_cb(f"{destination}까지 길 안내를 시작할게요. 잠시만요.")
+        """위치 수신 후 실행"""
 
-        # Google Maps 길 안내 요청
-        directions = await get_directions(lat, lng, destination)
+        # 1. 역지오코딩으로 현재 위치 주소 파악
+        origin_address = await reverse_geocode(lat, lng)
+        await speak_cb(f"확인된 현재 위치는 {origin_address}입니다.")
+        log.info("[%s] 확인된 위치: %s (%.5f, %.5f)", call_id, origin_address, lat, lng)
 
-        # 음성 안내
+        # 세션에 위치/주소 저장
+        upsert_session(call_id, pending_dest=destination)
+
+        # 2. 길 안내 요청 (NOT_FOUND 시 되묻기)
+        await speak_cb(f"{destination}까지 길 안내를 찾고 있어요. 잠시만요.")
+
+        try:
+            directions = await get_directions(lat, lng, destination)
+        except DestinationNotFoundError:
+            # 목적지 모호 → 사용자에게 지역 정보 요청
+            await speak_cb(
+                f"{destination}의 정확한 위치를 찾기 어려워요. "
+                f"가까운 지역이나 건물 이름을 함께 말씀해주시겠어요? "
+                f"예를 들어 '홍대 다이소' 또는 '강남역 다이소' 처럼요."
+            )
+            log.warning("[%s] 목적지 불명확: %s", call_id, destination)
+            return
+
+        # 3. 음성으로 길 안내
         voice_text = directions["summary"]
         steps_preview = "  ".join(directions["steps"][:3])
         if steps_preview:
             voice_text += f"  {steps_preview}"
         await speak_cb(voice_text)
 
-        # SMS 길 안내 자동 발송
+        # 4. SMS로 상세 길 안내 발송
         if phone_number:
             try:
                 await send_directions(phone_number, directions["sms_text"])
                 await speak_cb("상세 길 안내를 문자로도 보내드렸어요.")
             except Exception as e:
                 log.error("[%s] 길 안내 SMS 발송 실패: %s", call_id, e)
-
-        # 세션에 목적지 저장
-        upsert_session(call_id, pending_dest=destination)
 
     # 콜백 등록
     register_location_callback(call_id, destination, on_location)
