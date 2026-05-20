@@ -86,6 +86,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
     <button id="sendBtn" onclick="send()" disabled>전송</button>
   </div>
 
+  <div style="padding:0 14px 8px;display:flex;gap:8px;align-items:center">
+    <input type="tel" id="phoneInput" placeholder="+821012345678 (SMS 테스트용)"
+      style="flex:1;font-size:12px;padding:7px 10px;border:1px solid #e5e5ea;border-radius:8px;background:#f2f2f7;outline:none"
+      onfocus="this.style.borderColor='#007aff';this.style.background='#fff'"
+      onblur="this.style.borderColor='#e5e5ea';this.style.background='#f2f2f7'">
+  </div>
   <div class="btn-row">
     <button onclick="startSession()">🟢 세션 시작</button>
     <button onclick="clearSession()">🔄 초기화</button>
@@ -114,7 +120,12 @@ async function startSession() {
   document.getElementById('messages').innerHTML = '';
   addMsg('system', '연결 중...');
 
-  const r = await fetch('/chat/session', {method:'POST'});
+  const phone = document.getElementById('phoneInput')?.value.trim() || "";
+  const r = await fetch('/chat/session', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone_number: phone})
+  });
   const d = await r.json();
   sid = d.session_id;
 
@@ -186,6 +197,11 @@ async function send(preset) {
             hideTyping(); addMsg('smalltalk', chunk.text); showTyping();
           } else if (chunk.type === 'sub_result') {
             addMsg('sub', chunk.text, chunk.meta);
+          } else if (chunk.type === 'action') {
+            hideTyping();
+            const locMsg = chunk.text || `📍 ${chunk.destination} 위치 링크 SMS 발송 중...`;
+            addMsg('system', locMsg);
+            showTyping();
           } else if (chunk.type === 'final') {
             hideTyping(); addMsg('agent', chunk.text);
           } else if (chunk.type === 'error') {

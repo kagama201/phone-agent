@@ -26,22 +26,28 @@ from app.core.multi_agent import MultiAgentRunner, get_design
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat-test"])
 
-# 세션 히스토리 저장소 (메모리)
+# 세션 히스토리 + 전화번호 저장소 (메모리)
 _sessions: Dict[str, list] = {}
+_phones: Dict[str, str] = {}
 
 
 class SessionResponse(BaseModel):
     session_id: str
     greeting: str
 
+class SessionRequest(BaseModel):
+    phone_number: str = ""   # 테스트용 전화번호 (SMS 발송에 사용)
+
 class MessageRequest(BaseModel):
     text: str
 
 
 @router.post("/session", response_model=SessionResponse)
-async def create_session():
+async def create_session(body: SessionRequest = None):
     session_id = str(uuid.uuid4())[:8]
+    phone = (body.phone_number or "").strip() if body else ""
     _sessions[session_id] = []
+    _phones[session_id] = phone   # 전화번호 저장
     design = get_design()
 
     # 첫 인사를 LLM이 메인 프롬프트를 보고 직접 생성
@@ -69,9 +75,15 @@ async def send_message(session_id: str, body: MessageRequest):
     history = _sessions[session_id]
     design = get_design()
     runner = MultiAgentRunner()
+    phone  = _phones.get(session_id, "")
 
     # 사용자 메시지 히스토리에 추가
     history.append({"role": "user", "content": body.text})
+
+    # 테스트 세션의 전화번호를 location_agent에서 사용할 수 있도록 DB에 저장
+    if phone:
+        from app.db.design_store import upsert_session
+        upsert_session(session_id, phone_number=phone)
 
     async def event_stream():
         final_text = ""
@@ -79,6 +91,31 @@ async def send_message(session_id: str, body: MessageRequest):
             async for chunk in runner.run(body.text, history[:-1], design):
                 data = json.dumps(chunk, ensure_ascii=False)
                 yield f"data: {data}\n\n"
+                if chunk.get("type") == "action":
+                    act = chunk.get("action")
+                    if act == "request_location":
+                        dest = chunk.get("destination", "목적지")
+                        # 테스트 채팅에서도 SMS 발송
+                        import asyncio as _aio
+                        async def _req_loc():
+                            try:
+                                from app.core.location_agent import request_location_and_guide
+                                import os
+                                async def _speak(text):
+                                    pass  # 텍스트 채팅은 음성 불필요
+                                await request_location_and_guide(
+                                    call_id=session_id,
+                                    phone_number=phone,
+                                    destination=dest,
+                                    speak_cb=_speak,
+                                )
+                            except Exception as e:
+                                log.error("location_guide 오류: %s", e)
+                        _aio.create_task(_req_loc())
+                        data_out = json.dumps({"type": "action", "action": act,
+                                               "destination": dest, "text": f"📍 {dest} 위치 링크 SMS 발송 중..."},
+                                              ensure_ascii=False)
+                        yield f"data: {data_out}\n\n"
                 if chunk.get("type") == "final":
                     final_text = chunk.get("text", "")
         except Exception as e:
@@ -103,6 +140,7 @@ async def get_history(session_id: str):
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
     _sessions.pop(session_id, None)
+    _phones.pop(session_id, None)
     return {"session_id": session_id, "status": "closed"}
 
 

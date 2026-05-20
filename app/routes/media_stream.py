@@ -31,6 +31,9 @@ async def media_stream(ws: WebSocket):
     agent: CallAgent | None = None
     stream_sid = ""
 
+    # WS URL 쿼리스트링에서 발신자 번호 파싱 (twiml.py에서 전달)
+    _ws_phone = ws.query_params.get("from", "")
+
     async def send_audio(sid: str, b64: str):
         await ws.send_text(json.dumps({
             "event": "media",
@@ -47,9 +50,10 @@ async def media_stream(ws: WebSocket):
                 meta       = data["start"]
                 stream_sid = meta["streamSid"]
                 call_id    = meta.get("callSid", stream_sid)
-                # Twilio 발신자 번호 — customParameters 또는 start.from
+                # 발신자 번호 — WS 쿼리스트링 우선, 없으면 customParameters
                 custom = meta.get("customParameters", {})
                 phone  = (
+                    _ws_phone or
                     custom.get("From") or
                     meta.get("from") or
                     meta.get("From") or
