@@ -117,9 +117,15 @@ class CallAgent:
                         dest = chunk.get("destination", "목적지")
                         await bus.publish(self.call_id, "action",
                                          action=act, destination=dest)
-                        # 위치 요청 프로세스 시작 (SMS 발송 + 콜백 등록)
                         await self.request_location_guide(dest)
                         final_text = f"{dest}(으)로 위치 링크를 보내드렸습니다."
+                    elif act == "send_sms":
+                        await bus.publish(self.call_id, "action", action=act)
+                        from app.core.location_agent import send_directions_on_demand
+                        result_msg = await send_directions_on_demand(self.call_id)
+                        await bus.publish(self.call_id, "agent", text=result_msg, phase="reply")
+                        await self._speak(result_msg)
+                        final_text = result_msg
                 elif ctype == "final":
                     final_text = chunk["text"]
                     await bus.publish(self.call_id, "agent", text=final_text, phase="reply")

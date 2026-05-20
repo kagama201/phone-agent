@@ -42,6 +42,35 @@ def unregister_location_callback(call_id: str) -> None:
     _pending_destinations.pop(call_id, None)
 
 
+async def send_directions_on_demand(call_id: str) -> str:
+    """
+    사용자가 '문자로 보내줘' 요청 시 호출.
+    세션에 저장된 마지막 길 안내를 SMS로 발송.
+    반환: 사용자에게 안내할 텍스트
+    """
+    meta = get_session_meta(call_id)
+    if not meta:
+        return "저장된 길 안내 정보가 없습니다."
+
+    sms_text     = meta.get("last_directions", "")
+    phone_number = meta.get("phone_number", "")
+
+    if not sms_text:
+        return "먼저 목적지를 말씀해주시면 길 안내 후 문자를 보내드릴게요."
+
+    if not phone_number:
+        return "전화번호를 확인할 수 없어서 문자를 보내기 어렵습니다."
+
+    try:
+        await send_directions(phone_number, sms_text)
+        dest = meta.get("pending_dest", "목적지")
+        log.info("[%s] 길 안내 SMS 발송 완료: %s", call_id, phone_number)
+        return f"{dest} 상세 길 안내를 문자로 보내드렸어요."
+    except Exception as e:
+        log.error("[%s] 길 안내 SMS 발송 실패: %s", call_id, e)
+        return "문자 발송에 문제가 생겼어요. 잠시 후 다시 시도해주세요."
+
+
 async def on_location_received(session_id: str, lat: float, lng: float) -> None:
     cb = _location_callbacks.pop(session_id, None)
     if cb:
@@ -92,13 +121,13 @@ async def request_location_and_guide(
             voice_text += f"  {steps_preview}"
         await speak_cb(voice_text)
 
-        # 4. SMS로 상세 길 안내 발송
-        if phone_number:
-            try:
-                await send_directions(phone_number, directions["sms_text"])
-                await speak_cb("상세 길 안내를 문자로도 보내드렸어요.")
-            except Exception as e:
-                log.error("[%s] 길 안내 SMS 발송 실패: %s", call_id, e)
+        # 4. 길 안내 내용 세션에 저장 (사용자 요청 시 SMS 발송)
+        upsert_session(
+            call_id,
+            pending_dest=destination,
+            last_directions=directions["sms_text"],
+        )
+        await speak_cb("상세 길 안내가 필요하시면 '문자로 보내줘'라고 말씀해주세요.")
 
     # 콜백 등록
     register_location_callback(call_id, destination, on_location)

@@ -85,6 +85,11 @@ JSON 없이 문장만 출력하세요.""",
   "확인된 현재 위치는 {주소}입니다."
 - 위치 정보를 바탕으로 최적 경로를 안내하세요.
 
+[SMS 발송 요청 처리]
+사용자가 "문자로 보내줘", "문자 보내줘", "SMS로 보내줘" 등을 요청하면:
+{"action": "send_sms"}
+를 응답 끝에 추가하세요.
+
 [응답 예시]
 사용자: "홍대 가고 싶어"
 응답: "홍대입구까지 안내해드릴게요. 위치 파악을 위해 SMS로 링크를 보내드릴게요.
@@ -92,6 +97,10 @@ JSON 없이 문장만 출력하세요.""",
 
 사용자: "다이소 가고 싶어"
 응답: "다이소 어느 지점으로 가실건가요? 근처 지역명을 말씀해주시면 정확히 안내해드릴게요."
+
+사용자: "문자로 보내줘"
+응답: "상세 길 안내를 문자로 보내드릴게요.
+{"action": "send_sms"}"
 
 절대 주변 건물을 물어보거나 위치를 직접 설명해달라고 하지 마세요.
 JSON 액션을 포함할 때는 반드시 destination에 구체적인 장소명을 입력하세요.""",
@@ -277,6 +286,10 @@ class MultiAgentRunner:
                 action_triggered = True
                 act_type = action.get("action")
 
+                import re as _re2
+                def _strip_json(t):
+                    return _re2.sub(r'[{][^}]+[}]', '', t).strip()
+
                 if act_type == "request_location":
                     dest = action.get("destination", "")
                     yield {
@@ -285,12 +298,22 @@ class MultiAgentRunner:
                         "destination": dest,
                         "meta": {"agent_id": sub.id},
                     }
-                    # 텍스트에서 JSON 부분 제거 후 표시
-                    import re
-                    clean = re.sub(r'\{[^}]+\}', '', result).strip()
+                    clean = _strip_json(result)
                     if clean:
                         yield {"type": "sub_result", "text": clean, "meta": {"agent_id": sub.id, "agent_name": sub.name}}
                     results.append({"id": sub.id, "name": sub.name, "answer": clean or result})
+                    continue
+
+                if act_type == "send_sms":
+                    yield {
+                        "type": "action",
+                        "action": "send_sms",
+                        "meta": {"agent_id": sub.id},
+                    }
+                    clean = _strip_json(result)
+                    if clean:
+                        yield {"type": "sub_result", "text": clean, "meta": {"agent_id": sub.id, "agent_name": sub.name}}
+                    results.append({"id": sub.id, "name": sub.name, "answer": "SMS 발송 요청"})
                     continue
 
             yield {"type": "sub_result", "text": result, "meta": {"agent_id": sub.id, "agent_name": sub.name}}
