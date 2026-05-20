@@ -71,9 +71,18 @@ JSON 없이 문장만 출력하세요.""",
             name="교통 안내",
             description="길찾기, 대중교통, 버스/지하철 노선, 소요시간, 위치 안내",
             prompt="""당신은 교통 전문 AI입니다.
-길찾기, 대중교통, 버스/지하철 노선, 소요시간, 위치 안내를 담당합니다.
-구체적이고 실용적인 정보를 2~3문장으로 안내하세요.
-실시간 데이터가 없으면 일반적인 방법을 안내하세요.""",
+
+사용자가 특정 장소로 가고 싶다고 하면:
+1. 목적지 이름을 파악하세요
+2. 사용자의 현재 위치를 알 수 없으므로 반드시 아래 JSON을 응답 끝에 추가하세요:
+{"action": "request_location", "destination": "목적지명"}
+
+예시 응답:
+"홍대입구까지 길 안내를 도와드리겠습니다. 정확한 위치 파악을 위해 SMS로 링크를 보내드릴게요.
+{"action": "request_location", "destination": "홍대입구역"}"
+
+절대 주변 건물을 물어보거나 위치를 직접 설명해달라고 하지 마세요.
+반드시 JSON 액션을 포함하세요.""",
             enabled=True,
             next_agents=[],
         ),
@@ -243,10 +252,35 @@ class MultiAgentRunner:
         )
 
         results = []
+        action_triggered = False
+
         for sub, result in zip(to_run, sub_results):
             if isinstance(result, Exception):
                 log.error("서브 에이전트 오류 [%s]: %s", sub.id, result)
                 continue
+
+            # JSON 액션 감지 (예: request_location)
+            action = self._parse_action(result)
+            if action and not action_triggered:
+                action_triggered = True
+                act_type = action.get("action")
+
+                if act_type == "request_location":
+                    dest = action.get("destination", "")
+                    yield {
+                        "type": "action",
+                        "action": "request_location",
+                        "destination": dest,
+                        "meta": {"agent_id": sub.id},
+                    }
+                    # 텍스트에서 JSON 부분 제거 후 표시
+                    import re
+                    clean = re.sub(r'\{[^}]+\}', '', result).strip()
+                    if clean:
+                        yield {"type": "sub_result", "text": clean, "meta": {"agent_id": sub.id, "agent_name": sub.name}}
+                    results.append({"id": sub.id, "name": sub.name, "answer": clean or result})
+                    continue
+
             yield {"type": "sub_result", "text": result, "meta": {"agent_id": sub.id, "agent_name": sub.name}}
             results.append({"id": sub.id, "name": sub.name, "answer": result})
 

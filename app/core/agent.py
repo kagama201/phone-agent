@@ -111,6 +111,15 @@ class CallAgent:
                         agent_id=chunk.get("meta", {}).get("agent_id", ""),
                         agent_name=chunk.get("meta", {}).get("agent_name", ""),
                     )
+                elif ctype == "action":
+                    act = chunk.get("action")
+                    if act == "request_location":
+                        dest = chunk.get("destination", "목적지")
+                        await bus.publish(self.call_id, "action",
+                                         action=act, destination=dest)
+                        # 위치 요청 프로세스 시작 (SMS 발송 + 콜백 등록)
+                        await self.request_location_guide(dest)
+                        final_text = f"{dest}(으)로 위치 링크를 보내드렸습니다."
                 elif ctype == "final":
                     final_text = chunk["text"]
                     await bus.publish(self.call_id, "agent", text=final_text, phase="reply")
