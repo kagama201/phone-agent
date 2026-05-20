@@ -42,7 +42,12 @@ class CallAgent:
     async def start(self) -> None:
         await bus.call_start(self.call_id, self._phone)
         await self._stt.connect(on_utterance=self._on_utterance)
-        log.info("[%s] 에이전트 시작", self.call_id)
+        log.info("[%s] 에이전트 시작 (phone=%s)", self.call_id, self._phone)
+
+        # 전화번호를 세션 DB에 저장 (SMS 발송용)
+        if self._phone:
+            from app.db.design_store import upsert_session
+            upsert_session(self.call_id, phone_number=self._phone)
 
         # Twilio WS 스트림 안정화 대기 (너무 빨리 보내면 유실)
         await asyncio.sleep(1.0)
@@ -149,6 +154,19 @@ class CallAgent:
 
     # ── 종료 ───────────────────────────────────
     async def close(self) -> None:
+        from app.core.location_agent import unregister_location_callback
+        unregister_location_callback(self.call_id)
         await self._stt.close()
         await bus.call_end(self.call_id)
         log.info("[%s] 에이전트 종료", self.call_id)
+
+    # ── 위치 기반 길 안내 요청 (외부 호출용) ────────
+    async def request_location_guide(self, destination: str) -> None:
+        """교통 서브 에이전트가 위치가 없을 때 호출"""
+        from app.core.location_agent import request_location_and_guide
+        await request_location_and_guide(
+            call_id      = self.call_id,
+            phone_number = self._phone,
+            destination  = destination,
+            speak_cb     = self._speak,
+        )

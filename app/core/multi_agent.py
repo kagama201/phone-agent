@@ -294,6 +294,19 @@ class MultiAgentRunner:
             [{"role": "user", "content": user_text}],
         )
 
+    def _parse_action(self, text: str) -> dict | None:
+        """서브 에이전트 응답에서 JSON 액션 추출"""
+        import json, re
+        m = re.search(r'\{[^}]+\}', text)
+        if m:
+            try:
+                data = json.loads(m.group())
+                if "action" in data:
+                    return data
+            except Exception:
+                pass
+        return None
+
     async def _direct_answer(self, user_text: str, history: list[dict], main: MainAgentConfig) -> str:
         simple_prompt = main.prompt.split("\n")[0] + "\n2~3문장으로 자연스럽게 답변하세요."
         msgs = list(history[-6:]) + [{"role": "user", "content": user_text}]

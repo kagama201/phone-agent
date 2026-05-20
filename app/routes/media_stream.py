@@ -47,8 +47,15 @@ async def media_stream(ws: WebSocket):
                 meta       = data["start"]
                 stream_sid = meta["streamSid"]
                 call_id    = meta.get("callSid", stream_sid)
-                # Twilio가 발신자 번호를 customParameters로 전달 가능
-                phone = meta.get("customParameters", {}).get("From", "")
+                # Twilio 발신자 번호 — customParameters 또는 start.from
+                custom = meta.get("customParameters", {})
+                phone  = (
+                    custom.get("From") or
+                    meta.get("from") or
+                    meta.get("From") or
+                    ""
+                )
+                log.info("발신자 번호: %s", phone or "(없음)")
                 log.info("통화 시작: %s", call_id)
 
                 agent = CallAgent(
@@ -64,11 +71,7 @@ async def media_stream(ws: WebSocket):
                 asyncio.create_task(agent.start())
 
             elif event == "media" and agent:
-                # both_tracks 모드: track 필드로 inbound(사용자)만 STT 전달
-                # outbound(에이전트 TTS)는 에코이므로 무시
-                track = data["media"].get("track", "inbound")
-                if track == "inbound":
-                    await agent.receive_audio(data["media"]["payload"])
+                await agent.receive_audio(data["media"]["payload"])
 
             elif event == "stop":
                 log.info("통화 종료: %s", stream_sid)
