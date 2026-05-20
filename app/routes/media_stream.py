@@ -99,6 +99,8 @@ async def media_stream(ws: WebSocket):
 
             elif event == "stop":
                 log.info("통화 종료: %s", stream_sid)
+                if agent:
+                    agent._connected = False  # 진행 중 TTS 즉시 중단
                 break
 
     except WebSocketDisconnect:
