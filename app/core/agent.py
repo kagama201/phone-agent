@@ -179,9 +179,23 @@ class CallAgent:
     async def request_location_guide(self, destination: str) -> None:
         """교통 서브 에이전트가 위치가 없을 때 호출"""
         from app.core.location_agent import request_location_and_guide
+        from app.db.design_store import get_session_meta
+
+        # phone이 없으면 DB에서 재조회 (저장 타이밍 차이 대응)
+        phone = self._phone
+        if not phone:
+            meta = get_session_meta(self.call_id)
+            phone = (meta or {}).get("phone_number", "")
+            if phone:
+                self._phone = phone
+                log.info("[%s] DB에서 전화번호 복원: %s", self.call_id, phone)
+
+        log.info("[%s] request_location_guide — phone=%s dest=%s",
+                 self.call_id, phone or "(없음)", destination)
+
         await request_location_and_guide(
             call_id      = self.call_id,
-            phone_number = self._phone,
+            phone_number = phone,
             destination  = destination,
             speak_cb     = self._speak,
         )
