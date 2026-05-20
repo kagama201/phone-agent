@@ -2,16 +2,14 @@
 app/routes/chat.py
 ───────────────────
 에이전트 로직 테스트용 텍스트 채팅 엔드포인트.
-/prompt에서 저장한 에이전트 설계(get_design())를 그대로 사용해
-설계 변경이 즉시 테스트에 반영된다.
+/prompt에서 저장한 에이전트 설계를 실시간 반영.
 
-엔드포인트:
-  POST /chat/session              새 세션 시작 → 첫 인사 반환
-  POST /chat/session/{id}/message 메시지 전송 → SSE 스트리밍 응답
-  GET  /chat/session/{id}/history 대화 히스토리 조회
-  DELETE /chat/session/{id}       세션 종료
-  GET  /chat/sessions             활성 세션 목록
+위치 수신 후 메시지 흐름:
+  location_agent가 speak_cb 호출
+  → _session_queues[session_id]에 메시지 push
+  → GET /chat/session/{id}/stream SSE로 브라우저에 전달
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -22,13 +20,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.core.multi_agent import MultiAgentRunner, get_design
+from app.db.design_store import upsert_session
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat-test"])
 
-# 세션 히스토리 + 전화번호 저장소 (메모리)
+# 세션 저장소
 _sessions: Dict[str, list] = {}
-_phones: Dict[str, str] = {}
+_phones:   Dict[str, str]  = {}
+# 위치 수신 후 메시지를 브라우저로 push하는 큐
+_session_queues: Dict[str, asyncio.Queue] = {}
 
 
 class SessionResponse(BaseModel):
@@ -36,21 +37,23 @@ class SessionResponse(BaseModel):
     greeting: str
 
 class SessionRequest(BaseModel):
-    phone_number: str = ""   # 테스트용 전화번호 (SMS 발송에 사용)
+    phone_number: str = ""
 
 class MessageRequest(BaseModel):
     text: str
 
 
+# ── 세션 시작 ─────────────────────────────────────
 @router.post("/session", response_model=SessionResponse)
 async def create_session(body: SessionRequest = None):
     session_id = str(uuid.uuid4())[:8]
     phone = (body.phone_number or "").strip() if body else ""
     _sessions[session_id] = []
-    _phones[session_id] = phone   # 전화번호 저장
-    design = get_design()
+    _phones[session_id]   = phone
+    _session_queues[session_id] = asyncio.Queue()
+    log.info("세션 생성: %s phone=%s", session_id, phone or "(없음)")
 
-    # 첫 인사를 LLM이 메인 프롬프트를 보고 직접 생성
+    design = get_design()
     from app.providers.factory import get_llm
     llm = get_llm()
     try:
@@ -59,65 +62,80 @@ async def create_session(body: SessionRequest = None):
             [{"role": "user", "content": "전화가 연결됐어. 첫 인사를 해줘. 한 문장으로."}],
         )
     except Exception as e:
-        log.warning("첫 인사 생성 실패, 기본값 사용: %s", e)
+        log.warning("인사 생성 실패: %s", e)
         greeting = "안녕하세요! 무엇을 도와드릴까요?"
 
     _sessions[session_id].append({"role": "assistant", "content": greeting})
-    log.info("세션 생성: %s (design: %d sub-agents)", session_id, len(design.sub_agents))
     return SessionResponse(session_id=session_id, greeting=greeting)
 
 
+# ── 메시지 전송 ───────────────────────────────────
 @router.post("/session/{session_id}/message")
 async def send_message(session_id: str, body: MessageRequest):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
 
     history = _sessions[session_id]
-    design = get_design()
-    runner = MultiAgentRunner()
-    phone  = _phones.get(session_id, "")
+    design  = get_design()
+    runner  = MultiAgentRunner()
+    phone   = _phones.get(session_id, "")
+    log.info("세션 %s phone=%s", session_id, phone or "(없음)")
 
-    # 사용자 메시지 히스토리에 추가
     history.append({"role": "user", "content": body.text})
 
-    # 테스트 세션의 전화번호를 location_agent에서 사용할 수 있도록 DB에 저장
     if phone:
-        from app.db.design_store import upsert_session
         upsert_session(session_id, phone_number=phone)
+
+    # speak_cb: 위치 수신 후 메시지를 세션 큐에 push → SSE 스트림으로 전달
+    q = _session_queues.get(session_id)
+
+    async def speak_to_queue(text: str):
+        """location_agent의 speak_cb — 큐에 push"""
+        if q:
+            await q.put({"type": "agent", "text": text, "source": "location"})
+        log.info("[%s] location speak: %s", session_id, text)
 
     async def event_stream():
         final_text = ""
+        action_triggered = False
         try:
             async for chunk in runner.run(body.text, history[:-1], design):
-                data = json.dumps(chunk, ensure_ascii=False)
-                yield f"data: {data}\n\n"
-                if chunk.get("type") == "action":
-                    act = chunk.get("action")
-                    if act == "request_location":
-                        dest = chunk.get("destination", "목적지")
-                        # 테스트 채팅에서도 SMS 발송
-                        import asyncio as _aio
-                        async def _req_loc():
-                            try:
-                                from app.core.location_agent import request_location_and_guide
-                                import os
-                                async def _speak(text):
-                                    pass  # 텍스트 채팅은 음성 불필요
-                                await request_location_and_guide(
-                                    call_id=session_id,
-                                    phone_number=phone,
-                                    destination=dest,
-                                    speak_cb=_speak,
-                                )
-                            except Exception as e:
-                                log.error("location_guide 오류: %s", e)
-                        _aio.create_task(_req_loc())
-                        data_out = json.dumps({"type": "action", "action": act,
-                                               "destination": dest, "text": f"📍 {dest} 위치 링크 SMS 발송 중..."},
-                                              ensure_ascii=False)
-                        yield f"data: {data_out}\n\n"
-                if chunk.get("type") == "final":
+                ctype = chunk.get("type")
+
+                # action — 위치 요청
+                if ctype == "action" and chunk.get("action") == "request_location":
+                    action_triggered = True
+                    dest = chunk.get("destination", "목적지")
+
+                    # 큐에 진행 중 메시지 push
+                    sms_msg = {"type": "agent", "text": f"📍 {dest} 위치 링크를 SMS로 발송합니다.", "source": "action"}
+                    yield f"data: {json.dumps(sms_msg, ensure_ascii=False)}\n\n"
+
+                    # location_agent 비동기 실행 (speak_cb → 큐)
+                    async def _run_location(d=dest):
+                        try:
+                            from app.core.location_agent import request_location_and_guide
+                            await request_location_and_guide(
+                                call_id=session_id,
+                                phone_number=phone,
+                                destination=d,
+                                speak_cb=speak_to_queue,
+                            )
+                        except Exception as e:
+                            log.error("location_guide 오류: %s", e)
+                            if q:
+                                await q.put({"type": "agent", "text": "위치 요청 처리 중 오류가 발생했습니다.", "source": "error"})
+                    asyncio.create_task(_run_location())
+                    continue
+
+                # sub_result / smalltalk / final
+                if ctype in ("sub_result", "smalltalk"):
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+                if ctype == "final" and not action_triggered:
                     final_text = chunk.get("text", "")
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
         except Exception as e:
             log.exception("send_message 오류")
             err = json.dumps({"type": "error", "text": str(e)}, ensure_ascii=False)
@@ -130,6 +148,34 @@ async def send_message(session_id: str, body: MessageRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── 위치 수신 후 메시지 SSE 스트림 ────────────────
+@router.get("/session/{session_id}/stream")
+async def session_stream(session_id: str):
+    """
+    위치 수신 후 location_agent가 speak_cb로 push한 메시지를
+    브라우저에 SSE로 전달. 테스트 UI가 이 엔드포인트를 구독.
+    """
+    if session_id not in _session_queues:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    q = _session_queues[session_id]
+
+    async def stream():
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=60)
+                if msg is None:   # 종료 시그널
+                    yield "data: [DONE]\n\n"
+                    break
+                yield f"data: {json.dumps(msg, ensure_ascii=False)}\n\n"
+            except asyncio.TimeoutError:
+                # keep-alive ping
+                yield "data: {\"type\":\"ping\"}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── 히스토리 조회 ──────────────────────────────────
 @router.get("/session/{session_id}/history")
 async def get_history(session_id: str):
     if session_id not in _sessions:
@@ -137,13 +183,18 @@ async def get_history(session_id: str):
     return {"session_id": session_id, "history": _sessions[session_id]}
 
 
+# ── 세션 종료 ──────────────────────────────────────
 @router.delete("/session/{session_id}")
 async def delete_session(session_id: str):
     _sessions.pop(session_id, None)
     _phones.pop(session_id, None)
+    q = _session_queues.pop(session_id, None)
+    if q:
+        await q.put(None)  # 스트림 종료
     return {"session_id": session_id, "status": "closed"}
 
 
+# ── 활성 세션 목록 ─────────────────────────────────
 @router.get("/sessions")
 async def list_sessions():
     design = get_design()
@@ -152,6 +203,5 @@ async def list_sessions():
         "sessions": list(_sessions.keys()),
         "active_design": {
             "sub_agents": [a.id for a in design.sub_agents if a.enabled],
-            "main_prompt_preview": design.main.prompt[:80] + "...",
         }
     }

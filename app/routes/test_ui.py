@@ -133,6 +133,7 @@ async function startSession() {
   addMsg('agent', d.greeting);
   document.getElementById('dot').className = 'dot on';
   document.getElementById('sidEl').textContent = sid;
+  startLocationStream(sid);  // 위치 수신 후 메시지 스트림 구독
   document.getElementById('inp').disabled = false;
   document.getElementById('inp').placeholder = '메시지를 입력하세요...';
   document.getElementById('sendBtn').disabled = false;
@@ -219,7 +220,31 @@ async function send(preset) {
   }
 }
 
+let locationStream = null;
+
+function startLocationStream(session_id) {
+  if (locationStream) locationStream.close();
+  locationStream = new EventSource(`/chat/session/${session_id}/stream`);
+  locationStream.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'ping') return;
+      if (data.type === 'agent' && data.text) {
+        hideTyping();
+        addMsg('agent', data.text);
+        // 히스토리에 추가
+        if (data.source === 'location') {
+          addMsg('system', '📍 위치 기반 안내');
+        }
+      }
+      if (data.type === '[DONE]') locationStream.close();
+    } catch(e) {}
+  };
+  locationStream.onerror = () => {};
+}
+
 function clearSession() {
+  if (locationStream) { locationStream.close(); locationStream = null; }
   if (sid) fetch(`/chat/session/${sid}`, {method:'DELETE'});
   sid = null;
   document.getElementById('messages').innerHTML = '<div class="msg system"><div class="bubble">세션이 초기화되었습니다</div></div>';
