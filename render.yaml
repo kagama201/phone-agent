@@ -32,6 +32,16 @@ services:
 
       # ── 프롬프트 설계 영속화 ─────────────────────
       # /prompt에서 저장 시 자동 업데이트됨 (재배포 후 복원용)
+      # Render 서비스 외부 URL (WS URL 생성에 사용)
+      # 예: https://phone-ai-agent.onrender.com
+      # Google Maps (길 안내)
+      # console.cloud.google.com → Directions API 활성화
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+
+      - key: RENDER_EXTERNAL_URL
+        sync: false
+
       - key: DESIGN_JSON
         sync: false
       # Render API 키 (설계 자동 백업용) — 선택사항
